@@ -32,6 +32,11 @@ export interface SphereROI {
     suvMean: number;
     suvStd: number;
     voxelCount: number;
+    ctMeanHu: number | null;
+    ctMaxHu: number | null;
+    ctMinHu: number | null;
+    ctStdHu: number | null;
+    ctVoxelCount: number;
 }
 
 export interface PolygonROIState {
@@ -711,6 +716,11 @@ export const useSegmentationStore = defineStore('segmentation', {
                 suvMean: 0,
                 suvStd: 0,
                 voxelCount: 0,
+                ctMeanHu: null,
+                ctMaxHu: null,
+                ctMinHu: null,
+                ctStdHu: null,
+                ctVoxelCount: 0,
             };
         },
 
