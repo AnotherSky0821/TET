@@ -116,7 +116,7 @@ import { useSegmentationStore } from '../stores/segmentation';
 import { usePerfStore } from '../stores/perf';
 import { isWebGpuAvailable, getGpuDeviceSync } from './webgpu/gpuContext';
 import { updateMaskTextureSlice } from './webgpu/maskCache';
-import { sphereStatsInPet, fillPolygonOnSlice, findMaximumAxis as maxAxis } from './segmentation/maskOps';
+import { sphereStatsInPet, sphereStatsInVolume, fillPolygonOnSlice, findMaximumAxis as maxAxis } from './segmentation/maskOps';
 import { TRACER_PRESETS, tracerById, detectTracer, type TracerPreset } from './tracerPresets';
 import { buildOpacityLut, DEFAULT_TF, TF_PRESETS } from './vrTf';
 import { VrDemo } from './vrDemo';
@@ -3531,22 +3531,18 @@ const wheel = (e: WheelEvent) => {
   }
 
   // 球 ROI ツール active かつ、マウスが球内 → 半径変更
-  if (leftButtonFunction.value === "sphereROI" && segStore.sphere && segStore.petVolumeRef && isVolumeImageBoxInfo(id)){
-    const [x, y] = getCanvasXY(e as unknown as MouseEvent);
-    const w = screenToWorld(id, x, y);
-    const c = segStore.sphere.centerWorld;
-    const dx = w.x - c.x, dy = w.y - c.y, dz = w.z - c.z;
-    const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
-    if (dist < segStore.sphere.radiusMm){
-      const step = e.deltaY > 0 ? -2 : 2;
-      let r = segStore.sphere.radiusMm + step;
-      // 最小 5mm: これ未満だと球が小さすぎて再度大きくする際にカーソルが球内に入れられない。
-      if (r < 5) r = 5;
-      if (r > 200) r = 200;
-      segStore.sphere.radiusMm = r;
-      recomputeSphereStats();
-      show();
-      return;
+  if (leftButtonFunction.value === "sphereROI" && segStore.sphere && isAnyVolumeBox(id)){
+    const box = getVolumeImageBoxInfo(id);
+    if (!isProjectionInfo(box)) {
+      const [x, y] = getCanvasXY(e as unknown as MouseEvent);
+      const w = screenToWorld(id, x, y);
+      const c = segStore.sphere.centerWorld;
+      const dx = w.x - c.x, dy = w.y - c.y, dz = w.z - c.z;
+      const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
+      if (dist < segStore.sphere.radiusMm){
+        setSphereRadius(segStore.sphere.radiusMm + (e.deltaY > 0 ? -2 : 2));
+        return;
+      }
     }
   }
 
@@ -4028,17 +4024,19 @@ if (typeof window !== "undefined"){
 
 const handleSphereClick = (e: MouseEvent) => {
   const id = getIdOfEventOccured(e);
-  if (!isVolumeImageBoxInfo(id)) return;
-  if (!segStore.petVolumeRef) return;
+  if (!isAnyVolumeBox(id)) return;
+  const box = getVolumeImageBoxInfo(id);
+  if (isProjectionInfo(box)) return;
   const [x, y] = getCanvasXY(e);
   const w = screenToWorld(id, x, y);
 
-  // Reference sphere 配置モード (liver / bloodPool) なら通常の sphere ROI 経路を bypass
+  // PERCIST reference sphere is PET-only.
   if (segStore.referencePlacementMode) {
+    const pet = segStore.petVolumeRef;
+    if (!pet) return;
     const kind = segStore.referencePlacementMode;
-    // PERCIST 既定: liver = 30mm 球 (3cm)、bloodPool = 10mm 球 (1cm)
     const refRadius = kind === 'liver' ? 15 : 5;
-    const stats = sphereStatsInPet(segStore.petVolumeRef, w, refRadius);
+    const stats = sphereStatsInPet(pet, w, refRadius);
     segStore.setReferenceSphere(kind, w, refRadius, {
       suvMean: stats.suvMean, suvStd: stats.suvStd, voxelCount: stats.voxelCount,
     });
@@ -4047,24 +4045,54 @@ const handleSphereClick = (e: MouseEvent) => {
   }
 
   const radius = segStore.sphere?.radiusMm ?? 10;
-  // sphere が無ければ作成、あれば center だけ更新 (crosshair も同位置に)
   if (!segStore.sphere) segStore.setSphere(w, radius);
+  else segStore.sphere.centerWorld.copy(w);
+  recomputeSphereStats();
   if (syncRoiSlice.value) jumpToWorld(w);
   else {
-    segStore.setCrosshairWorld(w);  // 内部で sphere center 同期 + stats 再計算
+    segStore.setCrosshairWorld(w);
     show();
   }
 };
 
 const recomputeSphereStats = () => {
   const s = segStore.sphere;
+  if (!s) return;
+
   const pet = segStore.petVolumeRef;
-  if (!s || !pet) return;
-  const stats = sphereStatsInPet(pet, s.centerWorld, s.radiusMm);
-  s.suvMax = stats.suvMax;
-  s.suvMean = stats.suvMean;
-  s.suvStd = stats.suvStd;
-  s.voxelCount = stats.voxelCount;
+  if (pet) {
+    const stats = sphereStatsInVolume(pet, s.centerWorld, s.radiusMm);
+    s.suvMax = stats.max;
+    s.suvMean = stats.mean;
+    s.suvStd = stats.std;
+    s.voxelCount = stats.voxelCount;
+  } else {
+    s.suvMax = 0; s.suvMean = 0; s.suvStd = 0; s.voxelCount = 0;
+  }
+
+  const ct = segStore.ctVolumeRef;
+  if (ct) {
+    const stats = sphereStatsInVolume(ct, s.centerWorld, s.radiusMm);
+    s.ctMeanHu = stats.voxelCount > 0 ? stats.mean : null;
+    s.ctMaxHu = stats.voxelCount > 0 ? stats.max : null;
+    s.ctMinHu = stats.voxelCount > 0 ? stats.min : null;
+    s.ctStdHu = stats.voxelCount > 0 ? stats.std : null;
+    s.ctVoxelCount = stats.voxelCount;
+  } else {
+    s.ctMeanHu = null; s.ctMaxHu = null; s.ctMinHu = null; s.ctStdHu = null; s.ctVoxelCount = 0;
+  }
+};
+
+// Radius changes from numeric input, +/- buttons, and wheel all use this path.
+const setSphereRadius = (value: number | string) => {
+  const s = segStore.sphere;
+  if (!s) return;
+  const raw = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(raw)) return;
+  const clamped = Math.min(200, Math.max(5, raw));
+  s.radiusMm = Math.round(clamped * 2) / 2;
+  recomputeSphereStats();
+  show();
 };
 
 // シリーズ idx を box id にロードする (drop ハンドラから呼ばれる)。
@@ -5239,9 +5267,10 @@ const drawAnnotationOverlays = (i: number) => {
   // 矩形 ROI は box 種別を問わず描く (DICOM slice / Volume / Fusion)。
   drawRectRoiOverlays(i);
 
-  // 球 / polygon は Volume box のみ。
-  if (!isVolumeImageBoxInfo(i)) return;
+  // 球 / polygon は非投影の Volume / Fusion box。
+  if (!isAnyVolumeBox(i)) return;
   const a = getVolumeImageBoxInfo(i);
+  if (isProjectionInfo(a)) return;
 
   // 球: 現スライス面と球の交差円を描く。
   const s = segStore.sphere;
@@ -7440,11 +7469,21 @@ defineExpose({
           @click="segStore.clearSphere(); sphereFloatOffset = { x: 0, y: 0 }; show()"
         />
       </div>
-      <div class="mv-sphere-float-max">
+      <div v-if="segStore.sphere.ctMeanHu != null" class="mv-sphere-float-max">
+        <span class="lbl">CT Mean</span>
+        <span class="val">{{ segStore.sphere.ctMeanHu.toFixed(1) }} HU</span>
+      </div>
+      <div v-if="segStore.sphere.ctMeanHu != null" class="mv-sphere-float-row"><span>CT Max / Min</span><span class="mono">{{ segStore.sphere.ctMaxHu?.toFixed(1) }} / {{ segStore.sphere.ctMinHu?.toFixed(1) }} HU</span></div>
+      <div v-if="segStore.sphere.ctMeanHu != null" class="mv-sphere-float-row"><span>CT SD</span><span class="mono">{{ segStore.sphere.ctStdHu?.toFixed(1) }} HU</span></div>
+      <div v-if="segStore.sphere.ctMeanHu != null" class="mv-sphere-float-row"><span>CT voxels</span><span class="mono">{{ segStore.sphere.ctVoxelCount }}</span></div>
+      <div v-if="segStore.sphere.ctMeanHu == null && segStore.sphere.suvMean !== 0" class="mv-sphere-float-max">
         <span class="lbl">SUVmax</span>
         <span class="val">{{ segStore.sphere.suvMax.toFixed(3) }}</span>
       </div>
-      <div class="mv-sphere-float-row"><span>SUVmean</span><span class="mono">{{ segStore.sphere.suvMean.toFixed(3) }}</span></div>
+      <div v-if="segStore.sphere.ctMeanHu == null && segStore.sphere.suvMean !== 0" class="mv-sphere-float-row"><span>SUVmean / SD</span><span class="mono">{{ segStore.sphere.suvMean.toFixed(3) }} / {{ segStore.sphere.suvStd.toFixed(3) }}</span></div>
+      <div v-if="segStore.sphere.ctMeanHu == null && segStore.sphere.suvMean !== 0" class="mv-sphere-float-row"><span>PET voxels</span><span class="mono">{{ segStore.sphere.voxelCount }}</span></div>
+      <div v-if="segStore.sphere.ctMeanHu != null && segStore.sphere.suvMean !== 0" class="mv-sphere-float-row"><span>PET SUVmax / mean</span><span class="mono">{{ segStore.sphere.suvMax.toFixed(3) }} / {{ segStore.sphere.suvMean.toFixed(3) }}</span></div>
+      <div v-if="segStore.sphere.ctMeanHu != null && segStore.sphere.suvMean !== 0" class="mv-sphere-float-row"><span>PET SD / voxels</span><span class="mono">{{ segStore.sphere.suvStd.toFixed(3) }} / {{ segStore.sphere.voxelCount }}</span></div>
       <div class="mv-sphere-float-row mv-sphere-radius-row">
         <span>Radius</span>
         <span class="mv-sphere-radius-control">
