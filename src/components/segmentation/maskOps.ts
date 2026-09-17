@@ -27,64 +27,56 @@ export const countByLabel = (mask: Uint16Array): Map<number, number> => {
     return m;
 }
 
+export interface SphereVolumeStats {
+    min: number;
+    max: number;
+    mean: number;
+    std: number;
+    voxelCount: number;
+}
+
+/** Calculate statistics for a physical spherical VOI in any Volume. */
+export const sphereStatsInVolume = (
+    volume: Volume,
+    centerWorld: THREE.Vector3,
+    radiusMm: number,
+): SphereVolumeStats => {
+    const cx = centerWorld.x, cy = centerWorld.y, cz = centerWorld.z;
+    const r2 = radiusMm * radiusMm;
+    const nx = volume.nx, ny = volume.ny, nz = volume.nz;
+    const vox = volume.voxel;
+    const stepX = volume.vectorX.length(), stepY = volume.vectorY.length(), stepZ = volume.vectorZ.length();
+    const padX = Math.ceil(radiusMm / Math.max(stepX, 1e-6)) + 1;
+    const padY = Math.ceil(radiusMm / Math.max(stepY, 1e-6)) + 1;
+    const padZ = Math.ceil(radiusMm / Math.max(stepZ, 1e-6)) + 1;
+    const centerVoxel = worldToVoxel(centerWorld, volume);
+    const i0 = Math.max(0, Math.floor(centerVoxel.x - padX)), i1 = Math.min(nx - 1, Math.ceil(centerVoxel.x + padX));
+    const j0 = Math.max(0, Math.floor(centerVoxel.y - padY)), j1 = Math.min(ny - 1, Math.ceil(centerVoxel.y + padY));
+    const k0 = Math.max(0, Math.floor(centerVoxel.z - padZ)), k1 = Math.min(nz - 1, Math.ceil(centerVoxel.z + padZ));
+    let min = Infinity, max = -Infinity, sum = 0, sum2 = 0, count = 0;
+    const p = new THREE.Vector3();
+    for (let k = k0; k <= k1; k++) for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
+        p.set(i, j, k);
+        const w = voxelToWorld(p, volume);
+        const dx=w.x-cx, dy=w.y-cy, dz=w.z-cz;
+        if (dx*dx + dy*dy + dz*dz > r2) continue;
+        const val=vox[k*nx*ny+j*nx+i];
+        if (val<min) min=val;
+        if (val>max) max=val;
+        sum += val; sum2 += val*val; count++;
+    }
+    if (count===0) return {min:0,max:0,mean:0,std:0,voxelCount:0};
+    const mean=sum/count;
+    return {min,max,mean,std:Math.sqrt(Math.max(0,sum2/count-mean*mean)),voxelCount:count};
+};
+
 export const sphereStatsInPet = (
     pet: Volume,
     centerWorld: THREE.Vector3,
     radiusMm: number,
 ) => {
-    const cx = centerWorld.x, cy = centerWorld.y, cz = centerWorld.z;
-    const r2 = radiusMm * radiusMm;
-
-    const nx = pet.nx, ny = pet.ny, nz = pet.nz;
-    const vox = pet.voxel;
-
-    const stepX = pet.vectorX.length();
-    const stepY = pet.vectorY.length();
-    const stepZ = pet.vectorZ.length();
-    const padX = Math.ceil(radiusMm / Math.max(stepX, 1e-6)) + 1;
-    const padY = Math.ceil(radiusMm / Math.max(stepY, 1e-6)) + 1;
-    const padZ = Math.ceil(radiusMm / Math.max(stepZ, 1e-6)) + 1;
-
-    const centerVoxel = worldToVoxel(centerWorld, pet);
-
-    const i0 = Math.max(0, Math.floor(centerVoxel.x - padX));
-    const i1 = Math.min(nx - 1, Math.ceil(centerVoxel.x + padX));
-    const j0 = Math.max(0, Math.floor(centerVoxel.y - padY));
-    const j1 = Math.min(ny - 1, Math.ceil(centerVoxel.y + padY));
-    const k0 = Math.max(0, Math.floor(centerVoxel.z - padZ));
-    const k1 = Math.min(nz - 1, Math.ceil(centerVoxel.z + padZ));
-
-    let max = -Infinity;
-    let sum = 0;
-    let sum2 = 0;
-    let count = 0;
-
-    const p = new THREE.Vector3();
-    for (let k = k0; k <= k1; k++) {
-        for (let j = j0; j <= j1; j++) {
-            for (let i = i0; i <= i1; i++) {
-                p.set(i, j, k);
-                const w = voxelToWorld(p, pet);
-                const dx = w.x - cx, dy = w.y - cy, dz = w.z - cz;
-                if (dx * dx + dy * dy + dz * dz > r2) continue;
-                const val = vox[k * nx * ny + j * nx + i];
-                if (val > max) max = val;
-                sum += val;
-                sum2 += val * val;
-                count++;
-            }
-        }
-    }
-
-    if (count === 0) return { suvMax: 0, suvMean: 0, suvStd: 0, voxelCount: 0 };
-    const mean = sum / count;
-    const variance = Math.max(0, sum2 / count - mean * mean);
-    return {
-        suvMax: max,
-        suvMean: mean,
-        suvStd: Math.sqrt(variance),
-        voxelCount: count,
-    };
+    const s=sphereStatsInVolume(pet,centerWorld,radiusMm);
+    return {suvMax:s.max,suvMean:s.mean,suvStd:s.std,voxelCount:s.voxelCount};
 }
 
 export interface PolygonPlaneFillParams {
