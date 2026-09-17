@@ -1,0 +1,347 @@
+import { type Ref } from 'vue';
+import { gzipSync, gunzipSync } from 'fflate';
+import { TF_PRESETS } from '../components/vrTf';
+import { type SerializedViewState, type SerializedBoxState } from '../components/viewStateUrl';
+import { useSegmentationStore, type RectROI } from '../stores/segmentation';
+
+// DicomView の「View state URL / Snapshot file (session save/load)」機能を切り出した composable。
+// これがアプリ唯一の「フルセッション保存」(App-bar のカメラアイコン)。1 つの .json に、
+// view 状態 (layout / window / CLUT / plane / MIP) と、(有効なら) PET segmentation 状態
+// (labels / threshold / sphere + **mask voxel を gzip + base64 で同梱**: finalMask/thresholdMask/
+// manualEdits) と、矩形 ROI をまとめる。復元は applySnapshotJson が view + mask + ROI を戻す。
+//
+// **mask は必ず圧縮すること (v2)。** 生の base64 (v1) だと Hirata の PET 256x490x146 で
+// 1 ファイル 139.7MB になり、読み戻しでページが落ちた。mask は非ゼロが 1.2% しかないので
+// gzip が桁で効く。読み込みは v1 も受ける (フォールバックは maskFromSnapshot)。
+// (旧 .mvs zip は不完全 (boxState 空) だったため廃止し、これに一本化した。)
+// rectRoiToJson / importRectRoisFromJson は rect ROI export とも共有されるため DicomView に残し、
+// ここには getter/関数として渡される。
+
+type BoxPlane = 'axi' | 'cor' | 'sag' | 'mip' | 'smip' | 'vr';
+
+// 矩形 ROI 1 件の JSON 表現 (snapshot / ROI export 共通)。voxel 座標。
+export interface RectRoiJson {
+  id: number;
+  label: string | null;
+  seriesIndex: number;
+  seriesUID: string | null;
+  topLeft: { x: number; y: number; z: number };
+  bottomRight: { x: number; y: number; z: number };
+}
+
+interface MetavolSnapshotFile {
+  schema: 'metavol-snapshot';
+  /**
+   * 1 = mask を **生の base64** で持つ (〜2026-08)。
+   * 2 = mask を **gzip してから base64**。読み込みは 1 も 2 も受ける。
+   *
+   * **v1 は実用にならなかった。** 実測 (Hirata の PET 256x490x146): mask 3 本 × 36.6MB を
+   * 素の base64 にすると **139.7MB** の .mvs になり、読み戻しでページが落ちた。
+   * mask は非ゼロが 1.2% しかないので gzip が極めてよく効く。
+   */
+  v: 1 | 2;
+  ts: number;
+  view: SerializedViewState;
+  segmentation: {
+    seriesUID: string;
+    seriesDescription?: string;
+    dims: [number, number, number];
+    threshold: number;
+    thresholdUnit: 'SUV' | 'CNTS';
+    labels: Array<{ id: number; name: string; color: [number, number, number] }>;
+    currentLabelId: number;
+    sphere: { centerWorld: [number, number, number]; radiusMm: number } | null;
+    // v1: 生の base64 (読み込みのみ対応、書き出しはしない)
+    finalMask_b64?: string;
+    thresholdMask_b64?: string;
+    manualEdits_b64?: string;
+    // v2: gzip -> base64
+    finalMask_gz_b64?: string;
+    thresholdMask_gz_b64?: string;
+    manualEdits_gz_b64?: string;
+  } | null;
+  // 矩形 ROI は PET volume 非依存 (DX 1 枚画像でも置ける) ため top-level に持つ。
+  rectRois?: RectRoiJson[];
+  // 位置合わせ (rigid 6-DOF) も PET/mask 非依存 (MR↔CT だけの融合でも起きる) ので top-level。
+  registrations?: Array<{ seriesUID: string; params: number[] }>;
+}
+
+export interface SnapshotIoCtx {
+  tileN: Ref<number | undefined>;
+  imageBoxInfos: Ref<any[]>;
+  syncImageBox: Ref<boolean | undefined>;
+  isDicomSliceImageBoxInfo: (i: number) => boolean;
+  isFusedImageBoxInfo: (i: number) => boolean;
+  isAnyVolumeBox: (i: number) => boolean;
+  getBoxCurrentPlane: (i: number) => BoxPlane | null;
+  setPlaneOnBox: (i: number, plane: BoxPlane) => void;
+  show: () => void;
+  rectRoiToJson: (r: RectROI) => RectRoiJson;
+  importRectRoisFromJson: (arr: unknown) => number;
+  // store に入れた registration を実際の volume 幾何へ掛け直す (適用件数を返す)。
+  // volume を持っているのは DicomView なので、ここからは callback 経由で呼ぶ。
+  applyStoredRegistrations: () => number;
+}
+
+export function useSnapshotIo(ctx: SnapshotIoCtx) {
+  const segStore = useSegmentationStore();
+
+  // ===== View state URL (B9: ?state=...) =====
+  // 現在の layout を SerializedViewState に圧縮 → URL 用 base64 を返す。
+  // 「Copy share URL」ボタン経由で呼ばれる想定。
+  const serializeCurrentViewState = (): SerializedViewState => {
+    const bs: SerializedBoxState[] = [];
+    for (let i = 0; i < (ctx.tileN.value ?? 0); i++) {
+      const info = ctx.imageBoxInfos.value[i] as any;
+      if (!info) continue;
+      const isDicom = ctx.isDicomSliceImageBoxInfo(i);
+      const isFusion = ctx.isFusedImageBoxInfo(i);
+      const isMip = !isDicom && info.isMip;
+      const k = isDicom ? 'd' : isFusion ? 'f' : isMip ? 'm' : 'v';
+      const b: SerializedBoxState = {
+        k,
+        s: info.currentSeriesNumber ?? 0,
+        wc: info.myWC ?? undefined,
+        ww: info.myWW ?? undefined,
+        c: info.clut,
+      };
+      if (!isDicom) b.p = ctx.getBoxCurrentPlane(i) ?? undefined;
+      if (info.interpolation) b.in = info.interpolation === 'nearest' ? 'n' : 'b';
+      if (isFusion) {
+        b.s1 = info.currentSeriesNumber1;
+        b.wc1 = info.myWC1 ?? undefined;
+        b.ww1 = info.myWW1 ?? undefined;
+        b.c1 = info.clut1;
+        b.oa = info.overlayAlpha;
+        if (info.interpolation1) b.in1 = info.interpolation1 === 'nearest' ? 'n' : 'b';
+      }
+      if (info.mip) {
+        if (info.mip.mipAngle) b.mipAngle = info.mip.mipAngle;
+        if (info.mip.thresholdSurfaceMip != null) b.surfThresh = info.mip.thresholdSurfaceMip;
+        if (info.mip.depthSurfaceMip != null) b.surfDepth = info.mip.depthSurfaceMip;
+        if (info.mip.alphaScale != null) b.alphaScale = info.mip.alphaScale;
+        if (info.mip.vrOpacityPresetId) b.vrPreset = info.mip.vrOpacityPresetId;
+      }
+      bs.push(b);
+    }
+    return { v: 1, t: ctx.tileN.value ?? 0, sync: !!ctx.syncImageBox.value, bs };
+  };
+
+  // ===== Snapshot file (B-replacement-of-share-URL) =====
+  const ab2b64 = (buf: ArrayBuffer | undefined): string | undefined => {
+    if (!buf) return undefined;
+    const u8 = new Uint8Array(buf);
+    // chunked btoa to avoid stack overflow on large buffers
+    let s = '';
+    const CH = 0x8000;
+    for (let i = 0; i < u8.length; i += CH) {
+      s += String.fromCharCode.apply(null, Array.from(u8.subarray(i, i + CH)) as number[]);
+    }
+    return btoa(s);
+  };
+  const b642ab = (s: string | undefined): ArrayBuffer | undefined => {
+    if (!s) return undefined;
+    const bin = atob(s);
+    const u8 = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+    return u8.buffer;
+  };
+
+  // gzip してから base64。**mask は非ゼロが数 % しかないので圧縮が桁で効く。**
+  const ab2gzb64 = (buf: ArrayBuffer | undefined): string | undefined => {
+    if (!buf) return undefined;
+    return ab2b64(gzipSync(new Uint8Array(buf)).buffer as ArrayBuffer);
+  };
+  const gzb642ab = (s: string | undefined): ArrayBuffer | undefined => {
+    if (!s) return undefined;
+    const raw = b642ab(s);
+    if (!raw) return undefined;
+    return gunzipSync(new Uint8Array(raw)).buffer as ArrayBuffer;
+  };
+  /** v2 (gzip) を優先し、無ければ v1 (生 base64) にフォールバックする。 */
+  const maskFromSnapshot = (gz: string | undefined, raw: string | undefined): ArrayBuffer | undefined =>
+    gz ? gzb642ab(gz) : b642ab(raw);
+
+  const buildSnapshotJson = (): string => {
+    const view = serializeCurrentViewState();
+    const segPayload = segStore.serializeForPersistence();
+    let segmentation: MetavolSnapshotFile['segmentation'] = null;
+    if (segPayload) {
+      segmentation = {
+        seriesUID: segPayload.seriesUID,
+        seriesDescription: segPayload.seriesDescription,
+        dims: segPayload.dims,
+        threshold: segPayload.threshold,
+        thresholdUnit: segPayload.thresholdUnit,
+        labels: segPayload.labels.map(l => ({ id: l.id, name: l.name, color: [l.color[0], l.color[1], l.color[2]] as [number, number, number] })),
+        currentLabelId: segPayload.currentLabelId,
+        sphere: segPayload.sphere,
+        finalMask_gz_b64: ab2gzb64(segPayload.finalMask),
+        thresholdMask_gz_b64: ab2gzb64(segPayload.thresholdMask),
+        manualEdits_gz_b64: ab2gzb64(segPayload.manualEdits),
+      };
+    }
+    const file: MetavolSnapshotFile = {
+      schema: 'metavol-snapshot',
+      v: 2,
+      ts: Date.now(),
+      view,
+      segmentation,
+      // 矩形 ROI は PET 非依存なので segmentation とは別に保存
+      rectRois: segStore.rectRois.map(ctx.rectRoiToJson),
+      registrations: segStore.registrations.map(r => ({ seriesUID: r.seriesUID, params: [...r.params] })),
+    };
+    return JSON.stringify(file);
+  };
+
+  // 結果: { ok, info: '...applied summary...' } / { ok: false, reason }
+  const applySnapshotJson = (jsonText: string): { ok: true; info: string } | { ok: false; reason: string } => {
+    let parsed: any;
+    try { parsed = JSON.parse(jsonText); } catch (e) {
+      return { ok: false, reason: 'Invalid JSON: ' + ((e as Error)?.message ?? e) };
+    }
+    if (!parsed || parsed.schema !== 'metavol-snapshot') {
+      return { ok: false, reason: 'Not a metavol-snapshot file.' };
+    }
+    // v1 (生 base64) と v2 (gzip) の両方を受ける。書き出しは常に v2。
+    if (parsed.v !== 1 && parsed.v !== 2) {
+      return { ok: false, reason: `Unsupported snapshot version: ${parsed.v}` };
+    }
+    const view = parsed.view as SerializedViewState | undefined;
+    if (!view || !Array.isArray(view.bs)) {
+      return { ok: false, reason: 'Snapshot has no view state.' };
+    }
+    // 注意: 元画像 (PET/CT voxel) は含まれないので、対応する image が seriesList に
+    // 既にロードされている前提 (mask voxel は下の segmentation で復元する)。
+    // currentSeriesNumber が範囲外のときは applyViewState 内で defensive にスキップされる。
+    applyViewState(view);
+
+    let segMsg = '';
+    if (parsed.segmentation) {
+      const s = parsed.segmentation;
+      const r = segStore.restoreFromPersistence({
+        thresholdMask: maskFromSnapshot(s.thresholdMask_gz_b64, s.thresholdMask_b64),
+        manualEdits: maskFromSnapshot(s.manualEdits_gz_b64, s.manualEdits_b64),
+        finalMask: maskFromSnapshot(s.finalMask_gz_b64, s.finalMask_b64),
+        dims: s.dims,
+        threshold: s.threshold,
+        thresholdUnit: s.thresholdUnit,
+        labels: s.labels,
+        currentLabelId: s.currentLabelId,
+        sphere: s.sphere,
+        savedAt: parsed.ts,
+      });
+      if (r.ok) segMsg = ' + segmentation';
+      else segMsg = ` (segmentation skipped: ${r.reason})`;
+    }
+
+    // 矩形 ROI の復元 (top-level、segmentation 非依存)
+    let rectMsg = '';
+    if (Array.isArray(parsed.rectRois)) {
+      segStore.clearRectRois();
+      const nr = ctx.importRectRoisFromJson(parsed.rectRois);
+      if (nr > 0) rectMsg = ` + ${nr} rect ROI(s)`;
+    }
+
+    // 位置合わせの復元。store に写しを入れてから、DicomView 側で実際の volume に掛け直す。
+    // 対応は seriesUID なので、別症例を開いていれば単に 0 件になる。
+    let regMsg = '';
+    segStore.clearRegistrations();
+    if (Array.isArray(parsed.registrations)) {
+      for (const r of parsed.registrations) {
+        if (r && typeof r.seriesUID === 'string' && Array.isArray(r.params) && r.params.length === 6) {
+          segStore.setRegistration(r.seriesUID, r.params.map(Number));
+        }
+      }
+    }
+    const nReg = ctx.applyStoredRegistrations();
+    if (nReg > 0) regMsg = ` + ${nReg} registration(s)`;
+
+    ctx.show();
+    return { ok: true, info: `${view.t} box(es) restored${segMsg}${rectMsg}${regMsg}` };
+  };
+
+  // File として download / 受け取り。
+  const downloadSnapshotFile = () => {
+    const json = buildSnapshotJson();
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const ts = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 15);
+    a.href = url;
+    a.download = `metavol-snapshot_${ts}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
+  const loadSnapshotFile = async (file: File): Promise<{ ok: true; info: string } | { ok: false; reason: string }> => {
+    try {
+      const text = await file.text();
+      return applySnapshotJson(text);
+    } catch (e) {
+      return { ok: false, reason: 'Read failed: ' + ((e as Error)?.message ?? e) };
+    }
+  };
+
+  const applyViewState = (state: SerializedViewState) => {
+    if (!state || state.bs.length === 0) return;
+    // **表示 box 数 (tileN) も戻すこと。**
+    // 以前はここで newTileN を計算するだけで **代入していなかった**ため、
+    // 保存時 16 box のスナップショットを 1 box の状態で読み込んでも 1 box のままだった
+    // (ログだけ "16 boxes" と出るので気付きにくい。実測 `npm run check:snapshot`)。
+    //
+    // **imageBoxInfos の長さを超えて tileN を上げないこと。** 超えると配列に穴 (undefined) が
+    // でき、template から呼ばれる判定関数が throw して **render が丸ごと停止**する
+    // (CLAUDE.md 2.8)。だから bs.length ではなく **現に存在する box 数**でも頭打ちにする。
+    const newTileN = Math.min(state.t, state.bs.length, ctx.imageBoxInfos.value.length);
+    for (let i = 0; i < newTileN; i++) {
+      const sb = state.bs[i];
+      const info = ctx.imageBoxInfos.value[i] as any;
+      if (!info) continue;
+      if (sb.s != null) info.currentSeriesNumber = sb.s;
+      if (sb.wc != null) info.myWC = sb.wc;
+      if (sb.ww != null) info.myWW = sb.ww;
+      if (sb.c != null) info.clut = sb.c;
+      if (sb.in) info.interpolation = sb.in === 'n' ? 'nearest' : 'bilinear';
+      // Fusion 化が必要な場合 (clut1 を持つ box への変換) は MVP では未対応 — 保存元と同 layout 前提
+      if (sb.s1 != null) info.currentSeriesNumber1 = sb.s1;
+      if (sb.wc1 != null) info.myWC1 = sb.wc1;
+      if (sb.ww1 != null) info.myWW1 = sb.ww1;
+      if (sb.c1 != null) info.clut1 = sb.c1;
+      if (sb.oa != null) info.overlayAlpha = sb.oa;
+      if (sb.in1) info.interpolation1 = sb.in1 === 'n' ? 'nearest' : 'bilinear';
+      // plane 切替
+      if (sb.p && ctx.isAnyVolumeBox(i)) {
+        ctx.setPlaneOnBox(i, sb.p as any);
+      }
+      // MIP/VR params
+      if (info.mip) {
+        if (sb.mipAngle != null) info.mip.mipAngle = sb.mipAngle;
+        if (sb.surfThresh != null) info.mip.thresholdSurfaceMip = sb.surfThresh;
+        if (sb.surfDepth != null) info.mip.depthSurfaceMip = sb.surfDepth;
+        if (sb.alphaScale != null) info.mip.alphaScale = sb.alphaScale;
+        if (sb.vrPreset) {
+          info.mip.vrOpacityPresetId = sb.vrPreset;
+          const preset = TF_PRESETS.find(pp => pp.id === sb.vrPreset);
+          if (preset) info.mip.vrOpacityTF = preset.tf.map(p => ({ ...p }));
+        }
+      }
+    }
+    if (state.sync != null) ctx.syncImageBox.value = state.sync;
+    // box の中身を入れ終えてから tileN を動かす (先に増やすと未設定の box が 1 フレーム見える)
+    if (newTileN > 0) ctx.tileN.value = newTileN;
+    ctx.show();
+    console.log(`[state] applied view state: ${newTileN} boxes`);
+  };
+
+  return {
+    serializeCurrentViewState,
+    buildSnapshotJson,
+    applySnapshotJson,
+    downloadSnapshotFile,
+    loadSnapshotFile,
+    applyViewState,
+  };
+}
