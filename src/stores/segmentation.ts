@@ -1034,6 +1034,7 @@ export const useSegmentationStore = defineStore('segmentation', {
                     centerWorld: new THREE.Vector3(...payload.sphere.centerWorld),
                     radiusMm: payload.sphere.radiusMm,
                     suvMax: 0, suvMean: 0, suvStd: 0, voxelCount: 0,
+                    ctMeanHu: null, ctMaxHu: null, ctMinHu: null, ctStdHu: null, ctVoxelCount: 0,
                 };
             }
             // 位置合わせは **記録するだけ**。実際に volume を動かすのは DicomView 側で、
