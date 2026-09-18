@@ -4120,11 +4120,26 @@ const handleSphereClick = (e: MouseEvent) => {
   syncRoiSlicesToWorld(w);
 };
 
+// The segmentation store normally owns the active PT volume.  A volume can
+// briefly be absent there while a PET box is already visible (for example
+// during DICOM-to-volume reconstruction).  Sphere measurements must still use
+// that visible PT/PET volume; otherwise the CT result remains while all SUV
+// fields are reset to zero and hidden by the UI.
+const petVolumeForSphereStats = (): VolumeType | null => {
+  if (segStore.petVolumeRef) return segStore.petVolumeRef;
+  for (let i = 0; i < seriesList.length; i++) {
+    const volume = seriesList[i]?.volume;
+    const modality = modalityOfSeries(i);
+    if (volume && (modality === 'PT' || modality === 'PET')) return volume;
+  }
+  return null;
+};
+
 const recomputeSphereStats = () => {
   const s = segStore.sphere;
   if (!s) return;
 
-  const pet = segStore.petVolumeRef;
+  const pet = petVolumeForSphereStats();
   if (pet) {
     const stats = sphereStatsInVolume(pet, s.centerWorld, s.radiusMm);
     s.suvMax = stats.max;
@@ -6044,8 +6059,8 @@ const refreshSegStoreVolumeRefs = () => {
     for (let i = 0; i < seriesList.length; i++) {
       const v = seriesList[i].volume;
       if (!v) continue;
-      const m = v.metadata?.modality;
-      if (m === "PT") { segStore.setPetVolume(v); break; }
+      const m = (v.metadata?.modality ?? '').toUpperCase();
+      if (m === "PT" || m === "PET") { segStore.setPetVolume(v); break; }
     }
   }
   if (segStore.ctVolumeRef == null) {
@@ -7541,14 +7556,14 @@ defineExpose({
       <div v-if="segStore.sphere.ctMeanHu != null" class="mv-sphere-float-row"><span>CT Max / Min</span><span class="mono">{{ segStore.sphere.ctMaxHu?.toFixed(1) }} / {{ segStore.sphere.ctMinHu?.toFixed(1) }} HU</span></div>
       <div v-if="segStore.sphere.ctMeanHu != null" class="mv-sphere-float-row"><span>CT SD</span><span class="mono">{{ segStore.sphere.ctStdHu?.toFixed(1) }} HU</span></div>
       <div v-if="segStore.sphere.ctMeanHu != null" class="mv-sphere-float-row"><span>CT voxels</span><span class="mono">{{ segStore.sphere.ctVoxelCount }}</span></div>
-      <div v-if="segStore.sphere.ctMeanHu == null && segStore.sphere.suvMean !== 0" class="mv-sphere-float-max">
+      <div v-if="segStore.sphere.ctMeanHu == null && segStore.sphere.voxelCount > 0" class="mv-sphere-float-max">
         <span class="lbl">SUVmax</span>
         <span class="val">{{ segStore.sphere.suvMax.toFixed(3) }}</span>
       </div>
-      <div v-if="segStore.sphere.ctMeanHu == null && segStore.sphere.suvMean !== 0" class="mv-sphere-float-row"><span>SUVmean / SD</span><span class="mono">{{ segStore.sphere.suvMean.toFixed(3) }} / {{ segStore.sphere.suvStd.toFixed(3) }}</span></div>
-      <div v-if="segStore.sphere.ctMeanHu == null && segStore.sphere.suvMean !== 0" class="mv-sphere-float-row"><span>PET voxels</span><span class="mono">{{ segStore.sphere.voxelCount }}</span></div>
-      <div v-if="segStore.sphere.ctMeanHu != null && segStore.sphere.suvMean !== 0" class="mv-sphere-float-row"><span>PET SUVmax / mean</span><span class="mono">{{ segStore.sphere.suvMax.toFixed(3) }} / {{ segStore.sphere.suvMean.toFixed(3) }}</span></div>
-      <div v-if="segStore.sphere.ctMeanHu != null && segStore.sphere.suvMean !== 0" class="mv-sphere-float-row"><span>PET SD / voxels</span><span class="mono">{{ segStore.sphere.suvStd.toFixed(3) }} / {{ segStore.sphere.voxelCount }}</span></div>
+      <div v-if="segStore.sphere.ctMeanHu == null && segStore.sphere.voxelCount > 0" class="mv-sphere-float-row"><span>SUVmean / SD</span><span class="mono">{{ segStore.sphere.suvMean.toFixed(3) }} / {{ segStore.sphere.suvStd.toFixed(3) }}</span></div>
+      <div v-if="segStore.sphere.ctMeanHu == null && segStore.sphere.voxelCount > 0" class="mv-sphere-float-row"><span>PET voxels</span><span class="mono">{{ segStore.sphere.voxelCount }}</span></div>
+      <div v-if="segStore.sphere.ctMeanHu != null && segStore.sphere.voxelCount > 0" class="mv-sphere-float-row"><span>PET SUVmax / mean</span><span class="mono">{{ segStore.sphere.suvMax.toFixed(3) }} / {{ segStore.sphere.suvMean.toFixed(3) }}</span></div>
+      <div v-if="segStore.sphere.ctMeanHu != null && segStore.sphere.voxelCount > 0" class="mv-sphere-float-row"><span>PET SD / voxels</span><span class="mono">{{ segStore.sphere.suvStd.toFixed(3) }} / {{ segStore.sphere.voxelCount }}</span></div>
       <div class="mv-sphere-float-row mv-sphere-radius-row">
         <span>Radius</span>
         <span class="mv-sphere-radius-control">
