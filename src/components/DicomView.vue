@@ -1270,6 +1270,11 @@ const triggerMipFast = (i: number) => {
 
 // ---- Title bar emit ハンドラ ----
 const onTitlebarClose = (i: number) => {
+  if (sphereRoiDrag?.boxId === i) sphereRoiMouseUp();
+  if (pixelMeasure.value?.boxId === i) pixelMeasure.value = null;
+  const timer = mipIdleTimers.get(i);
+  if (timer != null) clearTimeout(timer);
+  mipIdleTimers.delete(i);
   // Box 自体を消す (旧仕様 = defaultInfo に戻して空 box を残す、を撤回)。
   // 残った box は applyAutoFit で自動的にレイアウトを再計算 → 残り box が拡大する。
   if (i < 0 || i >= imageBoxInfos.value.length) return;
@@ -1288,7 +1293,8 @@ const onTitlebarClose = (i: number) => {
   if ((tileN.value ?? 0) > 0) tileN.value = (tileN.value ?? 1) - 1;
   applyAutoFit();
   // selectedImageBoxId が範囲外になったらリセット
-  if (selectedImageBoxId.value >= (tileN.value ?? 0)) selectedImageBoxId.value = -1;
+  if (selectedImageBoxId.value >= (tileN.value ?? 0)) selectedImageBoxId.value = Math.max(0, (tileN.value ?? 0) - 1);
+  nextTick().then(() => show());
 };
 
 // Box i を複製して新しい box として末尾に追加。
@@ -2201,7 +2207,10 @@ const alignBoxThroughPlaneToWorld = (i: number, srcCenter: THREE.Vector3) => {
 const applySyncPaging = (srcId: number, add_number: number) => {
   changeSlice(srcId, add_number);
   showImage(srcId);
-  if (!syncImageBox.value) return;
+  if (!syncImageBox.value) {
+    recomputeSphereStats();
+    return;
+  }
 
   // source が Volume (非 MIP/VR) なら、その新しい断面中心を同期の基準にする。
   let srcCenter: THREE.Vector3 | null = null;
@@ -3367,6 +3376,7 @@ const brushCursor = ref<{ boxId: number; x: number; y: number } | null>(null);
 // Keeping this state outside the click handler also lets a drag continue when
 // the cursor leaves the canvas before mouseup.
 let sphereRoiDrag: { boxId: number } | null = null;
+const pixelMeasure = ref<{ boxId: number; screenX: number; screenY: number; petValue: number | null; ctValue: number | null } | null>(null);
 
 const isPointInsideSphereRoi = (boxId: number, x: number, y: number): boolean => {
   const sphere = segStore.sphere;
@@ -3393,12 +3403,26 @@ const sphereRoiMouseDown = (e: MouseEvent) => {
   if (!isPointInsideSphereRoi(id, x, y)) return;
   sphereRoiDrag = { boxId: id };
   selectedImageBoxId.value = id;
+  window.addEventListener('mousemove', sphereRoiMouseMoveWindow);
   window.addEventListener('mouseup', sphereRoiMouseUp, { once: true });
   e.preventDefault();
+  e.stopPropagation();
 };
 
+const sphereRoiMouseMoveWindow = (e: MouseEvent) => {
+  if (!sphereRoiDrag) return;
+  const box = imb.value?.[sphereRoiDrag.boxId] as any;
+  const cvRaw = box?.cv1;
+  const cv = cvRaw ? ((cvRaw.value ?? cvRaw) as HTMLCanvasElement) : null;
+  if (!cv) return;
+  const r = cv.getBoundingClientRect();
+  const x = cv.width ? (e.clientX - r.left) * cv.width / r.width : e.clientX - r.left;
+  const y = cv.height ? (e.clientY - r.top) * cv.height / r.height : e.clientY - r.top;
+  moveSphereRoiTo(sphereRoiDrag.boxId, x, y);
+};
 const sphereRoiMouseUp = () => {
   sphereRoiDrag = null;
+  window.removeEventListener('mousemove', sphereRoiMouseMoveWindow);
 };
 
 const mouseMove = (e: MouseEvent) => {
@@ -3630,6 +3654,8 @@ const imageBoxClicked = (e:MouseEvent) => {
 
   if (leftButtonFunction.value === "sphereROI") {
     handleSphereClick(e);
+  } else if (leftButtonFunction.value === "pixelROI") {
+    handlePixelClick(e);
   } else if (leftButtonFunction.value === "polygonROI") {
     handlePolygonClick(e);
   } else if (leftButtonFunction.value === "assignLabel") {
@@ -3658,10 +3684,11 @@ const handleAssignLabelClick = (e: MouseEvent) => {
 // ROI world point に各 MPR の through-plane だけを揃える。centerInWorld を point
 // で丸ごと置換すると面内成分 (= ユーザーの pan) まで失われるため、既存の
 // alignBoxThroughPlaneToWorld を使い法線方向だけ動かす。
-const syncRoiSlicesToWorld = (p: THREE.Vector3) => {
+const syncRoiSlicesToWorld = (p: THREE.Vector3, sourceId: number | null = null) => {
   if (syncRoiSlice.value) {
     for (let i = 0; i < imageBoxInfos.value.length; i++) {
       if (!isAnyVolumeBox(i)) continue;
+      if (sourceId != null && i === sourceId) continue;
       const a = getVolumeImageBoxInfo(i);
       if (isProjectionInfo(a) || !a.centerInWorld) continue;
       alignBoxThroughPlaneToWorld(i, p);
@@ -4088,6 +4115,31 @@ if (typeof window !== "undefined"){
   window.addEventListener("keydown", onKeyDown);
 }
 
+const handlePixelClick = (e: MouseEvent) => {
+  const id = getIdOfEventOccured(e);
+  if (!isAnyVolumeBox(id)) return;
+  const box = getVolumeImageBoxInfo(id);
+  if (isProjectionInfo(box)) return;
+  const [x, y] = getCanvasXY(e);
+  const w = screenToWorld(id, x, y);
+  const sample = (vol: VolumeType | null) => {
+    if (!vol) return null;
+    const seriesIdx = seriesList.findIndex(s => s.volume === vol);
+    if (seriesIdx < 0) return null;
+    const v = worldToVoxel_(w, seriesIdx);
+    const ix = Math.round(v.x), iy = Math.round(v.y), iz = Math.round(v.z);
+    if (ix < 0 || ix >= vol.nx || iy < 0 || iy >= vol.ny || iz < 0 || iz >= vol.nz) return null;
+    return vol.voxel[ix + iy * vol.nx + iz * vol.nx * vol.ny];
+  };
+  pixelMeasure.value = {
+    boxId: id, screenX: x, screenY: y,
+    petValue: sample(petVolumeForSphereStats()),
+    ctValue: sample(segStore.ctVolumeRef),
+  };
+  selectedImageBoxId.value = id;
+  show();
+};
+
 const handleSphereClick = (e: MouseEvent) => {
   const id = getIdOfEventOccured(e);
   if (!isAnyVolumeBox(id)) return;
@@ -4117,7 +4169,7 @@ const handleSphereClick = (e: MouseEvent) => {
   if (segStore.sphere) return;
   segStore.setSphere(w, 10);
   recomputeSphereStats();
-  syncRoiSlicesToWorld(w);
+  syncRoiSlicesToWorld(w, id);
 };
 
 // The segmentation store normally owns the active PT volume.  A volume can
@@ -5055,6 +5107,20 @@ const sphereStatsPreferPet = computed(() => {
 });
 
 // フローティングボックスのユーザドラッグ量 (ROI 追従位置に加算)。ヘッダを掴んで移動。
+const pixelFloatPosition = computed(() => {
+  const p = pixelMeasure.value;
+  if (!p) return { x: 0, y: 0 };
+  const box = imb.value?.[p.boxId] as any;
+  const cvRaw = box?.cv1;
+  const cv = cvRaw ? ((cvRaw.value ?? cvRaw) as HTMLCanvasElement) : null;
+  if (!cv) return { x: p.screenX + 14, y: p.screenY + 14 };
+  const r = cv.getBoundingClientRect();
+  return {
+    x: r.left + p.screenX * (r.width / cv.width) + 10,
+    y: r.top + p.screenY * (r.height / cv.height) + 10,
+  };
+});
+
 const sphereFloatOffset = ref({ x: 0, y: 0 });
 const sphereFloatFinalPos = computed<{ x: number; y: number } | null>(() => {
   const p = sphereFloatPos.value;
@@ -7547,6 +7613,15 @@ defineExpose({
       :show="debugShow"
     />
 
+    <div v-if="pixelMeasure" class="mv-pixel-float" :style="{ left: pixelFloatPosition.x + 'px', top: pixelFloatPosition.y + 'px' }">
+      <div class="mv-pixel-float-hdr">
+        1 Pixel
+        <v-btn icon="mdi-close" size="x-small" variant="text" density="compact" class="ml-auto" @click="pixelMeasure = null" />
+      </div>
+      <div v-if="pixelMeasure.petValue != null" class="mv-sphere-float-row"><span>SUV</span><span class="mono">{{ pixelMeasure.petValue.toFixed(3) }}</span></div>
+      <div v-if="pixelMeasure.ctValue != null" class="mv-sphere-float-row"><span>CT</span><span class="mono">{{ pixelMeasure.ctValue.toFixed(1) }} HU</span></div>
+    </div>
+
     <!-- Sphere VOI stats: 画像中の ROI 近傍に浮かせる (voxel inspector と同様)。ヘッダでドラッグ移動可。 -->
     <div
       v-if="sphereFloatFinalPos && segStore.sphere"
@@ -7896,6 +7971,13 @@ defineExpose({
   font: 11px 'JetBrains Mono', 'Consolas', monospace;
   text-align: right;
 }
+
+.mv-pixel-float {
+  position: fixed; z-index: 9997; min-width: 100px; padding: 5px 8px;
+  background: rgba(15, 20, 25, 0.94); border: 1px solid var(--mv-border);
+  border-radius: 5px; color: var(--mv-text); font-size: 11px;
+}
+.mv-pixel-float-hdr { display:flex; align-items:center; color:var(--mv-accent); font-size:10px; font-weight:700; margin-bottom:3px; }
 
 .mv-debug-badge {
   position: fixed;
