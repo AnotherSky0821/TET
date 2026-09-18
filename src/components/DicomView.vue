@@ -174,6 +174,7 @@ const angleDialDrag = ref<{
   throughCenter: boolean;
 } | null>(null);
 const angleDialDragging = ref(false);
+const angleDialPointer = ref<{ x: number; y: number } | null>(null);
 let angleDialHideTimer: ReturnType<typeof setTimeout> | null = null;
 
 const angleAdjustTargetBoxId = (): number | null => {
@@ -190,11 +191,26 @@ const angleDialShowForBox = (id: number) => {
   angleDialHoverBoxId.value = id;
 };
 
+const angleDialPointerMove = (e: MouseEvent) => {
+  angleDialPointer.value = { x: e.clientX, y: e.clientY };
+};
+
 const angleDialHideForBox = (id: number) => {
-  if (angleDialHoverBoxId.value !== id) return;
+  if (angleDialHoverBoxId.value !== id || angleDialDragging.value) return;
+  if (angleDialHideTimer) clearTimeout(angleDialHideTimer);
   angleDialHideTimer = setTimeout(() => {
+    // スライス送り等で ImageBox が再描画されると、一時的な mouseleave が発生することがある。
+    // 実際のカーソルがまだ box 内ならダイヤルを消さない。
+    const p = angleDialPointer.value;
+    const el = (imb.value?.[id] as any)?.$el as HTMLElement | undefined;
+    if (p && el) {
+      const r = el.getBoundingClientRect();
+      const inside = p.x >= r.left && p.x <= r.right && p.y >= r.top && p.y <= r.bottom;
+      if (inside) return;
+    }
     angleDialHoverBoxId.value = null;
     angleDialExpanded.value = null;
+    angleDialHideTimer = null;
   }, 180);
 };
 
@@ -429,6 +445,21 @@ const imageBoxSizeChanged = () => {
 // 「W だけ新・H は旧」の中間状態で先に呼ばれ、min(newW/oldW, 1)=1 となって倍率追従が
 // 打ち消される (100×100 → 200×200 で何も起きない)。配列 watch なら 1 tick 1 回。
 watch([imageBoxW, imageBoxH], imageBoxSizeChanged);
+watch(angleAdjustMode, (enabled) => {
+  if (enabled) {
+    window.addEventListener('mousemove', angleDialPointerMove);
+  } else {
+    window.removeEventListener('mousemove', angleDialPointerMove);
+    angleDialPointer.value = null;
+    angleDialHoverBoxId.value = null;
+    angleDialExpanded.value = null;
+    if (angleDialHideTimer) {
+      clearTimeout(angleDialHideTimer);
+      angleDialHideTimer = null;
+    }
+  }
+});
+
 watch(closingImages, () => {
   if (closingImages.value){
     initializeDicomListsImagesBoxInfos();
@@ -504,7 +535,12 @@ const debugMode = defineModel<boolean>('debugMode', { default: false });
 const autoFitMode = ref(true);
 // image area の実サイズ変化を監視して autoFit を再実行する observer (onMounted で生成)。
 let imageAreaResizeObserver: ResizeObserver | null = null;
-onUnmounted(() => { imageAreaResizeObserver?.disconnect(); imageAreaResizeObserver = null; });
+onUnmounted(() => {
+  window.removeEventListener('mousemove', angleDialPointerMove);
+  if (angleDialHideTimer) clearTimeout(angleDialHideTimer);
+  imageAreaResizeObserver?.disconnect();
+  imageAreaResizeObserver = null;
+});
 
 const applyAutoFit = () => {
   if (!autoFitMode.value) return;
