@@ -1590,6 +1590,33 @@ const drawSphereOverlay = (cx: number, cy: number, radiusPx: number) => {
 
 // Voxel brush のカーソル円。物理的に円形なブラシ (mm) を画面へ投影するため rx/ry は
 // px 単位で別々に受け取り (anisotropic 表示に対応) 楕円で描く。mode で色を変える。
+const drawPixelCursorOverlay = (cx: number, cy: number) => {
+  if (cv1.value === null || ctx === null) return;
+  if (!isFinite(cx) || !isFinite(cy)) return;
+  const arm = 8;
+  const gap = 2;
+  ctx.save();
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = "#00e5ff";
+  ctx.fillStyle = "#00e5ff";
+  ctx.shadowColor = "rgba(0,0,0,0.9)";
+  ctx.shadowBlur = 2;
+
+  // 中央を空けた十字。背景画像上でも位置を見失いにくくする。
+  ctx.beginPath();
+  ctx.moveTo(cx - arm, cy); ctx.lineTo(cx - gap, cy);
+  ctx.moveTo(cx + gap, cy); ctx.lineTo(cx + arm, cy);
+  ctx.moveTo(cx, cy - arm); ctx.lineTo(cx, cy - gap);
+  ctx.moveTo(cx, cy + gap); ctx.lineTo(cx, cy + arm);
+  ctx.stroke();
+
+  ctx.shadowBlur = 0;
+  ctx.beginPath();
+  ctx.arc(cx, cy, 2.2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+};
+
 const drawBrushCursorOverlay = (cx: number, cy: number, rx: number, ry: number, mode: 'add' | 'erase') => {
   if (cv1.value === null || ctx === null) return;
   if (!isFinite(rx) || !isFinite(ry) || rx <= 0 || ry <= 0) return;
@@ -1659,7 +1686,7 @@ const drawRectRoiOverlay = (
 defineExpose({init, show, show2, showRgb, showDirect,
    drawNiftiSlice, drawNiftiSliceFusion, drawNiftiMip, drawNiftiVR,
    drawFusionMip, drawFusionVR, clear,
-   drawSphereOverlay, drawPolygonOverlay, drawRectRoiOverlay, drawBrushCursorOverlay,
+   drawSphereOverlay, drawPixelCursorOverlay, drawPolygonOverlay, drawRectRoiOverlay, drawBrushCursorOverlay,
    // canvas pixel を外部から読む用 (parity test 等)
    cv1});
 
