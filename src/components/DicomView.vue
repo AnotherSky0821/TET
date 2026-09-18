@@ -7869,9 +7869,16 @@ defineExpose({
     </div>
 
     <!-- ZIO風 MPR回転ホイール。MPR boxにカーソルを合わせた時だけ表示。 -->
+    <!-- ダイヤルドラッグ中は画面全体を透明シールドで覆い、下のUI/画像へ操作を通さない。 -->
+    <div
+      v-if="angleDialDragging"
+      class="mv-angle-drag-shield"
+      aria-hidden="true"
+    />
     <div
       v-if="angleAdjustTargetBoxId() !== null"
       class="mv-angle-dials"
+      :class="{ 'is-dragging': angleDialDragging }"
       :style="angleDialStyle()"
       @mouseenter="angleDialShowForBox(angleAdjustTargetBoxId()!)"
       @mouseleave="angleDialHideForBox(angleAdjustTargetBoxId()!)"
@@ -8275,6 +8282,15 @@ defineExpose({
 }
 .mv-pixel-float-hdr { display:flex; align-items:center; color:var(--mv-accent); font-size:10px; font-weight:700; margin-bottom:3px; }
 
+.mv-angle-drag-shield {
+  position: fixed;
+  inset: 0;
+  z-index: 9995;
+  cursor: grabbing;
+  user-select: none;
+  touch-action: none;
+}
+
 .mv-angle-dials {
   position: fixed;
   z-index: 9996;
@@ -8302,6 +8318,15 @@ defineExpose({
 }
 .mv-angle-dial.is-dragging {
   cursor: grabbing;
+}
+
+/* ドラッグ中は、開始したダイヤル以外を完全に非操作化する。
+   透明シールドは下の画像・ツールバー等をブロックする。 */
+.mv-angle-dials.is-dragging .mv-angle-dial:not(.is-dragging) {
+  pointer-events: none;
+}
+.mv-angle-dials.is-dragging .mv-angle-dial-nudge {
+  pointer-events: none;
 }
 .mv-angle-dial-wheel {
   position: relative;
