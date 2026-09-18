@@ -282,48 +282,103 @@ const rotateMprFamilyOnAxis = (sourceId: number, axis: MprDialAxis, radians: num
   orientation.premultiply(delta);
   mprOrientationBySeries.set(seriesIdx, orientation);
 
-  // Fusion box がこの series と PET/CT の組を持っていれば、任意で相手側にも
-  // 同じ3D orientationを適用する。回転軸は world 軸なので、そのまま共有できる。
-  const pairedSeries = new Set<number>();
-  if (syncMprAngle.value) {
-    for (let i = 0; i < imageBoxInfos.value.length; i++) {
-      if (!isFusedImageBoxInfo(i)) continue;
-      const f = imageBoxInfos.value[i] as FusedVolumeImageBoxInfo;
-      let other = -1;
-      if (f.currentSeriesNumber === seriesIdx) other = f.currentSeriesNumber1;
-      else if (f.currentSeriesNumber1 === seriesIdx) other = f.currentSeriesNumber;
-      if (other < 0) continue;
-      const otherMod = modalityOfSeries(other);
-      const sourceMod = modalityOfSeries(seriesIdx);
-      const isPetCtPair = (sourceMod === 'PT' || sourceMod === 'PET')
-        ? otherMod === 'CT'
-        : sourceMod === 'CT' && (otherMod === 'PT' || otherMod === 'PET');
-      if (isPetCtPair && seriesList[other]?.volume) pairedSeries.add(other);
-    }
-  }
-  for (const other of pairedSeries) {
-    mprOrientationBySeries.set(other, orientation.clone());
+  // 回転時に「画像が急にズーム」しないよう、各 box が現在持っている
+  // screen scale (vecx/vecy/vecz の長さ) を保存してから basis だけを回す。
+  // auto-fit やユーザーの手動 zoom で作られた scale を planeVectorsWorld() で
+  // 上書きしてしまうのが、従来の急激な拡大/縮小の原因だった。
+  const boxScale = new Map<number, { x: number; y: number; z: number }>();
+  for (let i = 0; i < imageBoxInfos.value.length; i++) {
+    if (!isAnyVolumeBox(i) || isProjectionInfo(getVolumeImageBoxInfo(i))) continue;
+    const info = getVolumeImageBoxInfo(i);
+    boxScale.set(i, {
+      x: info.vecx.length(),
+      y: info.vecy.length(),
+      z: info.vecz.length(),
+    });
   }
 
-  const affected = new Set<number>([seriesIdx, ...pairedSeries]);
-  for (let i = 0; i < imageBoxInfos.value.length; i++) {
-    if (!isAnyVolumeBox(i)) continue;
-    const info = imageBoxInfos.value[i] as any;
-    const usesSeries = affected.has(info.currentSeriesNumber) || affected.has(info.currentSeriesNumber1);
-    if (!usesSeries || isProjectionInfo(info)) continue;
-    rebuildObliqueMprBox(i, mprOrientationBySeries.get(info.currentSeriesNumber) ?? orientation);
+  // まず操作元の orientation を確定。
+  // sync ON なら、Fusion 内の PT/CT だけでなく、Fusion 前に別 box で表示している
+  // 同一断面 (Axi/Axi, Cor/Cor, Sag/Sag) の CT/PT も同じ orientation にする。
+  const affectedSeries = new Set<number>([seriesIdx]);
+  if (syncMprAngle.value) {
+    const sourcePlane = mprPlaneOf(sourceInfo);
+    const sourceMod = modalityOfSeries(seriesIdx);
+    const isPetCt = sourceMod === 'CT' || sourceMod === 'PT' || sourceMod === 'PET';
+
+    for (let i = 0; i < imageBoxInfos.value.length; i++) {
+      if (!isAnyVolumeBox(i) || isProjectionInfo(getVolumeImageBoxInfo(i))) continue;
+      const info = getVolumeImageBoxInfo(i);
+      const plane = mprPlaneOf(info);
+      if (plane !== sourcePlane) continue;
+
+      const idxs = [info.currentSeriesNumber];
+      if (isFusedImageBoxInfo(i)) idxs.push((info as FusedVolumeImageBoxInfo).currentSeriesNumber1);
+
+      for (const idx of idxs) {
+        if (idx < 0 || idx === seriesIdx || !seriesList[idx]?.volume) continue;
+        const mod = modalityOfSeries(idx);
+        const isPair = isPetCt
+          && ((sourceMod === 'CT' && (mod === 'PT' || mod === 'PET'))
+            || ((sourceMod === 'PT' || sourceMod === 'PET') && mod === 'CT'));
+        if (isPair) affectedSeries.add(idx);
+      }
+    }
+
+    // さらに、同じ series が Fusion と単独 box の両方に存在する場合も同じ orientation を共有。
+    // Fusion を操作した場合も currentSeriesNumber / currentSeriesNumber1 の両方を拾える。
+    for (let i = 0; i < imageBoxInfos.value.length; i++) {
+      if (!isAnyVolumeBox(i) || isProjectionInfo(getVolumeImageBoxInfo(i))) continue;
+      const info = getVolumeImageBoxInfo(i);
+      if (info.currentSeriesNumber === seriesIdx) affectedSeries.add(seriesIdx);
+      if (isFusedImageBoxInfo(i)) {
+        const f = info as FusedVolumeImageBoxInfo;
+        if (f.currentSeriesNumber1 === seriesIdx) affectedSeries.add(seriesIdx);
+      }
+    }
+
+    for (const other of [...affectedSeries]) {
+      if (other !== seriesIdx) mprOrientationBySeries.set(other, orientation.clone());
+    }
   }
+
+  // orientation を反映。Fusion box は base/overlay のどちらが CT/PT でも、同一平面なら
+  // box 自体を source orientation で再構成する。
+  for (let i = 0; i < imageBoxInfos.value.length; i++) {
+    if (!isAnyVolumeBox(i) || isProjectionInfo(getVolumeImageBoxInfo(i))) continue;
+    const info = getVolumeImageBoxInfo(i);
+    const usesSeries = affectedSeries.has(info.currentSeriesNumber)
+      || (isFusedImageBoxInfo(i) && affectedSeries.has((info as FusedVolumeImageBoxInfo).currentSeriesNumber1));
+    if (!usesSeries) continue;
+
+    const idxForOrientation = affectedSeries.has(info.currentSeriesNumber)
+      ? info.currentSeriesNumber
+      : (info as FusedVolumeImageBoxInfo).currentSeriesNumber1;
+    rebuildObliqueMprBox(i, mprOrientationBySeries.get(idxForOrientation) ?? orientation);
+
+    // rebuildObliqueMprBox は基準 voxel spacing に戻すため、元の表示倍率を復元する。
+    const scale = boxScale.get(i);
+    if (scale) {
+      const sx = info.vecx.length() > 0 ? scale.x / info.vecx.length() : 1;
+      const sy = info.vecy.length() > 0 ? scale.y / info.vecy.length() : 1;
+      const sz = info.vecz.length() > 0 ? scale.z / info.vecz.length() : 1;
+      info.vecx.multiplyScalar(sx);
+      info.vecy.multiplyScalar(sy);
+      info.vecz.multiplyScalar(sz);
+    }
+  }
+
   // angle操作では全boxの再描画を行わない。全体 show() を通すと、他boxの描画状態や
   // fit判定を巻き込むため、角度を変更したboxだけを描画する。
   for (let i = 0; i < imageBoxInfos.value.length; i++) {
-    if (!isAnyVolumeBox(i)) continue;
-    const info = imageBoxInfos.value[i] as any;
-    const usesSeries = affected.has(info.currentSeriesNumber) || affected.has(info.currentSeriesNumber1);
-    if (!usesSeries || isProjectionInfo(info)) continue;
+    if (!isAnyVolumeBox(i) || isProjectionInfo(getVolumeImageBoxInfo(i))) continue;
+    const info = getVolumeImageBoxInfo(i);
+    const usesSeries = affectedSeries.has(info.currentSeriesNumber)
+      || (isFusedImageBoxInfo(i) && affectedSeries.has((info as FusedVolumeImageBoxInfo).currentSeriesNumber1));
+    if (!usesSeries) continue;
     showImage(i);
   }
 };
-
 const angleDialMouseDown = (e: MouseEvent, axis: MprDialAxis) => {
   if (!angleAdjustMode.value || e.button !== 0) return;
   const id = angleAdjustTargetBoxId();
