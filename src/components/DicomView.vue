@@ -198,11 +198,30 @@ const angleDialStyle = (): Record<string, string> => {
   const el = (imb.value?.[id] as any)?.$el as HTMLElement | undefined;
   if (!el) return { display: 'none' };
   const r = el.getBoundingClientRect();
+
+  // 3輪を縦積みにする。画面端では viewport 内に必ず収める。
   const size = 58;
   const gap = 8;
+  const padding = 5;
+  const margin = 8;
+  const groupW = size + padding * 2;
+  const groupH = size * 3 + gap * 2 + padding * 2;
+
+  // まず box の右上寄りに置き、入らなければ左側へ逃がす。
+  let left = r.right - groupW - 10;
+  if (left + groupW > window.innerWidth - margin) {
+    left = r.left - groupW - 10;
+  }
+  // 左右どちらにも十分な空間がなくても、最終的には viewport 内へ clamp。
+  left = Math.max(margin, Math.min(left, window.innerWidth - groupW - margin));
+
+  // 上下端でも切れないように clamp。
+  let top = r.top + 10;
+  top = Math.max(margin, Math.min(top, window.innerHeight - groupH - margin));
+
   return {
-    left: `${Math.round(r.right - size - 10)}px`,
-    top: `${Math.round(r.top + 10)}px`,
+    left: `${Math.round(left)}px`,
+    top: `${Math.round(top)}px`,
     '--dial-size': `${size}px`,
     '--dial-gap': `${gap}px`,
   };
@@ -8233,6 +8252,7 @@ defineExpose({
   position: fixed;
   z-index: 9996;
   display: flex;
+  flex-direction: column;
   align-items: center;
   gap: var(--dial-gap, 8px);
   padding: 5px;
@@ -8319,9 +8339,9 @@ defineExpose({
 }
 .mv-angle-dial-nudge {
   position: absolute;
-  left: 50%;
-  top: calc(100% + 2px);
-  transform: translateX(-50%);
+  left: calc(100% + 3px);
+  top: 50%;
+  transform: translateY(-50%);
   display: flex;
   gap: 3px;
   padding: 3px;
