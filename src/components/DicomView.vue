@@ -4124,9 +4124,7 @@ const handlePixelClick = (e: MouseEvent) => {
   const w = screenToWorld(id, x, y);
   const sample = (vol: VolumeType | null) => {
     if (!vol) return null;
-    const seriesIdx = seriesList.findIndex(s => s.volume === vol);
-    if (seriesIdx < 0) return null;
-    const v = worldToVoxel_(w, seriesIdx);
+    const v = worldToVoxel(w, vol);
     const ix = Math.round(v.x), iy = Math.round(v.y), iz = Math.round(v.z);
     if (ix < 0 || ix >= vol.nx || iy < 0 || iy >= vol.ny || iz < 0 || iz >= vol.nz) return null;
     return vol.voxel[ix + iy * vol.nx + iz * vol.nx * vol.ny];
