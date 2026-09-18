@@ -320,10 +320,21 @@
           :class="['mv-tool-btn', { 'is-active': leftButtonFunction === t.value }]"
           variant="text"
           size="small"
-          @click="leftButtonFunction = leftButtonFunction === t.value ? undefined : t.value"
+          @click="onToolClick(t.value)"
         >
           <v-icon :icon="t.icon" />
           <v-tooltip activator="parent" location="bottom">{{ t.label }}</v-tooltip>
+        </v-btn>
+
+        <v-btn
+          v-if="angleAdjustMode"
+          class="mv-tool-btn mv-angle-end-btn"
+          variant="text"
+          size="small"
+          @click="endAngleAdjust"
+        >
+          <v-icon icon="mdi-check-circle-outline" />
+          <v-tooltip activator="parent" location="bottom">角度調整を終了</v-tooltip>
         </v-btn>
 
         <!-- Window preset: 左サイドバーから移設。読影中に最も触るので常時見える位置に置く。
@@ -944,16 +955,34 @@ const syncRoiSlice = ref(true);
 const voxelInspector = ref(false);
 const showOverlayInfo = ref(true);
 const noGapMode = ref(true);
+// MPR 角度調整モード。ON の間はページ送りとは独立して角度を変更する。
+const angleAdjustMode = ref(false);
 
 const tools: Array<{ value: LeftButtonFunction; icon: string; label: string }> = [
   { value: 'window',     icon: 'mdi-contrast-circle',       label: 'ウィンドウ/レベル' },
   { value: 'pan',        icon: 'mdi-hand-back-right-outline', label: 'パン' },
   { value: 'zoom',       icon: 'mdi-magnify-plus-outline',  label: 'ズーム' },
-  { value: 'page',       icon: 'mdi-arrow-up-down',         label: 'ページ送り / MPR角度（Shift+ドラッグ）' },
+  { value: 'page',       icon: 'mdi-arrow-up-down',         label: 'ページ送り' },
+  { value: 'angleAdjust', icon: 'mdi-rotate-3d-variant',       label: 'MPR角度調整' },
   { value: 'sphereROI',  icon: 'mdi-circle-outline',        label: '球 VOI' },
   { value: 'pixelROI',   icon: 'mdi-crosshairs',             label: '1 Pixel 計測' },
   { value: 'assignLabel',icon: 'mdi-tag-outline',           label: 'ラベルを付与' },
 ];
+
+const onToolClick = (tool: LeftButtonFunction | 'angleAdjust') => {
+  if (tool === 'angleAdjust') {
+    angleAdjustMode.value = !angleAdjustMode.value;
+    if (angleAdjustMode.value) leftButtonFunction.value = 'page';
+    return;
+  }
+  if (angleAdjustMode.value) angleAdjustMode.value = false;
+  leftButtonFunction.value = leftButtonFunction.value === tool ? undefined : tool;
+};
+
+const endAngleAdjust = () => {
+  angleAdjustMode.value = false;
+  leftButtonFunction.value = undefined;
+};
 
 const fitToWindow = () => {
   dicomViewRef.value?.fitToWindow?.();
