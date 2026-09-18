@@ -5028,16 +5028,30 @@ const sphereScreenInBox = (i: number): { x: number; y: number } | null => {
   return { x: rect.left + cx * sxr + rPx + 10, y: rect.top + cy * syr - 12 };
 };
 
-const sphereFloatPos = computed<{ x: number; y: number } | null>(() => {
+// Keep the statistics ordering tied to the actual box beside which the panel is
+// drawn.  The selected box wins; when its sphere is off-plane we fall back to
+// the first intersecting box, matching the position logic below.
+const sphereFloatBoxId = computed<number | null>(() => {
   void boxStateVersion.value;   // 描画のたび再評価 (pan/zoom/page 追従)
   if (!segStore.sphere) return null;
-  const p = sphereScreenInBox(selectedImageBoxId.value);   // 選択 box を優先
-  if (p) return p;
+  const selected = selectedImageBoxId.value;
+  if (sphereScreenInBox(selected)) return selected;
   for (let i = 0; i < imageBoxInfos.value.length; i++) {
-    const q = sphereScreenInBox(i);
-    if (q) return q;
+    if (sphereScreenInBox(i)) return i;
   }
   return null;
+});
+
+const sphereFloatPos = computed<{ x: number; y: number } | null>(() => {
+  const id = sphereFloatBoxId.value;
+  return id == null ? null : sphereScreenInBox(id);
+});
+
+const sphereStatsPreferPet = computed(() => {
+  const id = sphereFloatBoxId.value;
+  if (id == null) return false;
+  const info = boxInfoAt(id) as { currentSeriesNumber?: number } | undefined;
+  return info?.currentSeriesNumber != null && isPtModality(modalityOfSeries(info.currentSeriesNumber));
 });
 
 // フローティングボックスのユーザドラッグ量 (ROI 追従位置に加算)。ヘッダを掴んで移動。
@@ -7549,21 +7563,25 @@ defineExpose({
           @click="segStore.clearSphere(); sphereFloatOffset = { x: 0, y: 0 }; show()"
         />
       </div>
-      <div v-if="segStore.sphere.ctMeanHu != null" class="mv-sphere-float-max">
-        <span class="lbl">CT Mean</span>
-        <span class="val">{{ segStore.sphere.ctMeanHu.toFixed(1) }} HU</span>
-      </div>
-      <div v-if="segStore.sphere.ctMeanHu != null" class="mv-sphere-float-row"><span>CT Max / Min</span><span class="mono">{{ segStore.sphere.ctMaxHu?.toFixed(1) }} / {{ segStore.sphere.ctMinHu?.toFixed(1) }} HU</span></div>
-      <div v-if="segStore.sphere.ctMeanHu != null" class="mv-sphere-float-row"><span>CT SD</span><span class="mono">{{ segStore.sphere.ctStdHu?.toFixed(1) }} HU</span></div>
-      <div v-if="segStore.sphere.ctMeanHu != null" class="mv-sphere-float-row"><span>CT voxels</span><span class="mono">{{ segStore.sphere.ctVoxelCount }}</span></div>
-      <div v-if="segStore.sphere.ctMeanHu == null && segStore.sphere.voxelCount > 0" class="mv-sphere-float-max">
+      <!-- PET box: SUVmax first.  CT/anatomy box: CT mean first. -->
+      <div v-if="sphereStatsPreferPet && segStore.sphere.voxelCount > 0" class="mv-sphere-float-max mv-sphere-suv">
         <span class="lbl">SUVmax</span>
         <span class="val">{{ segStore.sphere.suvMax.toFixed(3) }}</span>
       </div>
-      <div v-if="segStore.sphere.ctMeanHu == null && segStore.sphere.voxelCount > 0" class="mv-sphere-float-row"><span>SUVmean / SD</span><span class="mono">{{ segStore.sphere.suvMean.toFixed(3) }} / {{ segStore.sphere.suvStd.toFixed(3) }}</span></div>
-      <div v-if="segStore.sphere.ctMeanHu == null && segStore.sphere.voxelCount > 0" class="mv-sphere-float-row"><span>PET voxels</span><span class="mono">{{ segStore.sphere.voxelCount }}</span></div>
-      <div v-if="segStore.sphere.ctMeanHu != null && segStore.sphere.voxelCount > 0" class="mv-sphere-float-row"><span>PET SUVmax / mean</span><span class="mono">{{ segStore.sphere.suvMax.toFixed(3) }} / {{ segStore.sphere.suvMean.toFixed(3) }}</span></div>
-      <div v-if="segStore.sphere.ctMeanHu != null && segStore.sphere.voxelCount > 0" class="mv-sphere-float-row"><span>PET SD / voxels</span><span class="mono">{{ segStore.sphere.suvStd.toFixed(3) }} / {{ segStore.sphere.voxelCount }}</span></div>
+      <div v-else-if="segStore.sphere.ctMeanHu != null" class="mv-sphere-float-max">
+        <span class="lbl">CT Mean</span>
+        <span class="val">{{ segStore.sphere.ctMeanHu.toFixed(1) }} HU</span>
+      </div>
+      <div v-else-if="segStore.sphere.voxelCount > 0" class="mv-sphere-float-max mv-sphere-suv">
+        <span class="lbl">SUVmax</span>
+        <span class="val">{{ segStore.sphere.suvMax.toFixed(3) }}</span>
+      </div>
+      <div v-if="segStore.sphere.voxelCount > 0" class="mv-sphere-float-row mv-sphere-suv"><span>SUVmean / SD</span><span class="mono">{{ segStore.sphere.suvMean.toFixed(3) }} / {{ segStore.sphere.suvStd.toFixed(3) }}</span></div>
+      <div v-if="segStore.sphere.voxelCount > 0" class="mv-sphere-float-row mv-sphere-suv"><span>PET voxels</span><span class="mono">{{ segStore.sphere.voxelCount }}</span></div>
+      <div v-if="sphereStatsPreferPet && segStore.sphere.ctMeanHu != null" class="mv-sphere-float-row"><span>CT Mean</span><span class="mono">{{ segStore.sphere.ctMeanHu.toFixed(1) }} HU</span></div>
+      <div v-if="segStore.sphere.ctMeanHu != null" class="mv-sphere-float-row"><span>CT Max / Min</span><span class="mono">{{ segStore.sphere.ctMaxHu?.toFixed(1) }} / {{ segStore.sphere.ctMinHu?.toFixed(1) }} HU</span></div>
+      <div v-if="segStore.sphere.ctMeanHu != null" class="mv-sphere-float-row"><span>CT SD</span><span class="mono">{{ segStore.sphere.ctStdHu?.toFixed(1) }} HU</span></div>
+      <div v-if="segStore.sphere.ctMeanHu != null" class="mv-sphere-float-row"><span>CT voxels</span><span class="mono">{{ segStore.sphere.ctVoxelCount }}</span></div>
       <div class="mv-sphere-float-row mv-sphere-radius-row">
         <span>Radius</span>
         <span class="mv-sphere-radius-control">
@@ -7854,6 +7872,15 @@ defineExpose({
   font-family: 'JetBrains Mono', monospace;
   font-size: 10px;
   color: var(--mv-text);
+}
+/* SUV values need to remain legible over the dark floating panel regardless of
+   the active application accent color. */
+.mv-sphere-suv { color: #e6fbff; }
+.mv-sphere-suv .lbl { color: #d8f8ff; }
+.mv-sphere-suv .val,
+.mv-sphere-suv .mono {
+  color: #7ee7ff;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
 }
 .mv-sphere-radius-row { align-items: center; }
 .mv-sphere-radius-control {
