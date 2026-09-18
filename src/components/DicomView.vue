@@ -158,6 +158,8 @@ const noGapMode = defineModel<boolean>("noGapMode", { default: true });
 const mprOrientationBySeries = new Map<number, THREE.Quaternion>();
 // 独立した MPR 角度調整モード。ページ送りの Shift 操作とは分離する。
 const angleAdjustMode = defineModel<boolean>("angleAdjustMode", { default: false });
+// Fusion内のPET/CTを同じMPR角度へ同期するトグル。
+const syncMprAngle = defineModel<boolean>("syncMprAngle", { default: true });
 
 // ZIO風のMPR回転ホイール。角度調整モード中、カーソルをMPR boxへ置いた時だけ3軸を表示する。
 // 3つのホイールは同じ3軸角度を操作する。Axi=Z軸、Sag=X軸、Cor=Y軸。
@@ -280,12 +282,45 @@ const rotateMprFamilyOnAxis = (sourceId: number, axis: MprDialAxis, radians: num
   orientation.premultiply(delta);
   mprOrientationBySeries.set(seriesIdx, orientation);
 
+  // Fusion box がこの series と PET/CT の組を持っていれば、任意で相手側にも
+  // 同じ3D orientationを適用する。回転軸は world 軸なので、そのまま共有できる。
+  const pairedSeries = new Set<number>();
+  if (syncMprAngle.value) {
+    for (let i = 0; i < imageBoxInfos.value.length; i++) {
+      if (!isFusedImageBoxInfo(i)) continue;
+      const f = imageBoxInfos.value[i] as FusedVolumeImageBoxInfo;
+      let other = -1;
+      if (f.currentSeriesNumber === seriesIdx) other = f.currentSeriesNumber1;
+      else if (f.currentSeriesNumber1 === seriesIdx) other = f.currentSeriesNumber;
+      if (other < 0) continue;
+      const otherMod = modalityOfSeries(other);
+      const sourceMod = modalityOfSeries(seriesIdx);
+      const isPetCtPair = (sourceMod === 'PT' || sourceMod === 'PET')
+        ? otherMod === 'CT'
+        : sourceMod === 'CT' && (otherMod === 'PT' || otherMod === 'PET');
+      if (isPetCtPair && seriesList[other]?.volume) pairedSeries.add(other);
+    }
+  }
+  for (const other of pairedSeries) {
+    mprOrientationBySeries.set(other, orientation.clone());
+  }
+
+  const affected = new Set<number>([seriesIdx, ...pairedSeries]);
   for (let i = 0; i < imageBoxInfos.value.length; i++) {
     if (!isAnyVolumeBox(i)) continue;
     const info = imageBoxInfos.value[i] as any;
-    const usesSeries = info.currentSeriesNumber === seriesIdx || info.currentSeriesNumber1 === seriesIdx;
+    const usesSeries = affected.has(info.currentSeriesNumber) || affected.has(info.currentSeriesNumber1);
     if (!usesSeries || isProjectionInfo(info)) continue;
-    rebuildObliqueMprBox(i, orientation);
+    rebuildObliqueMprBox(i, mprOrientationBySeries.get(info.currentSeriesNumber) ?? orientation);
+  }
+  // angle操作では全boxの再描画を行わない。全体 show() を通すと、他boxの描画状態や
+  // fit判定を巻き込むため、角度を変更したboxだけを描画する。
+  for (let i = 0; i < imageBoxInfos.value.length; i++) {
+    if (!isAnyVolumeBox(i)) continue;
+    const info = imageBoxInfos.value[i] as any;
+    const usesSeries = affected.has(info.currentSeriesNumber) || affected.has(info.currentSeriesNumber1);
+    if (!usesSeries || isProjectionInfo(info)) continue;
+    showImage(i);
   }
 };
 
@@ -339,7 +374,6 @@ const angleDialMouseMoveWindow = (e: MouseEvent) => {
   if (Math.abs(delta) < 0.0001) return;
   drag.moved = true;
   rotateMprFamilyOnAxis(drag.boxId, drag.axis, delta);
-  show();
 };
 
 const angleDialMouseUpWindow = () => {
@@ -365,14 +399,12 @@ const angleDialWheel = (e: WheelEvent, axis: MprDialAxis) => {
   e.stopPropagation();
   const degrees = e.deltaY < 0 ? 0.5 : -0.5;
   rotateMprFamilyOnAxis(id, axis, degrees * Math.PI / 180);
-  show();
 };
 
 const angleDialNudge = (axis: MprDialAxis, degrees: number) => {
   const id = angleAdjustTargetBoxId();
   if (id == null) return;
   rotateMprFamilyOnAxis(id, axis, degrees * Math.PI / 180);
-  show();
 };
 const setTimeOutInitAndShow = () => {
   setTimeout(() => {
