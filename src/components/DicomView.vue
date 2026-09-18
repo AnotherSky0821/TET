@@ -5463,6 +5463,12 @@ const drawAnnotationOverlays = (i: number) => {
     }
   }
 
+  // 1 Pixel 計測位置: 十字 + 中心点で、測定対象の1画素を明確に示す。
+  // 測定時の canvas 座標をそのまま使うため、画像の再描画でも位置が安定する。
+  if (pixelMeasure.value && pixelMeasure.value.boxId === i){
+    imb.value![i].drawPixelCursorOverlay(pixelMeasure.value.screenX, pixelMeasure.value.screenY);
+  }
+
   // polygon: 描画中のものをオーバーレイ。inProgress ならカーソルまでのラバーバンドも描く。
   const p = segStore.polygon;
   if (p && p.imageBoxId === i && p.screenVertices.length > 0){
