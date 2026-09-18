@@ -3628,9 +3628,8 @@ const mouseMove = (e: MouseEvent) => {
       } else {
         // angleAdjustMode は上で処理済み（画像本体のドラッグは無効）。
         // page tool drag は MIP/sMIP/通常スライスでは plane-aware paging
-          doOneOrAllSamePlane(id, (i:number) => changeSlice(i, e.movementY));
-          recomputeSphereStats();
-        }
+        doOneOrAllSamePlane(id, (i:number) => changeSlice(i, e.movementY));
+        recomputeSphereStats();
         show();
       }
     }
