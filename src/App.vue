@@ -317,7 +317,7 @@
         <v-btn
           v-for="t in tools"
           :key="t.value"
-          :class="['mv-tool-btn', { 'is-active': leftButtonFunction === t.value }]"
+           :class="['mv-tool-btn', { 'is-active': t.value === 'angleAdjust' ? angleAdjustMode : leftButtonFunction === t.value }]"
           variant="text"
           size="small"
           @click="onToolClick(t.value)"
