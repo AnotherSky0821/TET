@@ -156,6 +156,8 @@ const noGapMode = defineModel<boolean>("noGapMode", { default: true });
 // Series-level oblique MPR orientation. A single orientation is shared by the
 // axial/coronal/sagittal family so each view is regenerated from the same 3D basis.
 const mprOrientationBySeries = new Map<number, THREE.Quaternion>();
+// 独立した MPR 角度調整モード。ページ送りの Shift 操作とは分離する。
+const angleAdjustMode = defineModel<boolean>("angleAdjustMode", { default: false });
 
 const setTimeOutInitAndShow = () => {
   setTimeout(() => {
@@ -3537,8 +3539,8 @@ const mouseMove = (e: MouseEvent) => {
         }
         showImage(id);
       } else {
-        if (e.shiftKey && isAnyVolumeBox(id)) {
-          // Shift + drag: MPR の面内角度を変更 (0.5 degree / pixel)
+        if (angleAdjustMode.value && isAnyVolumeBox(id)) {
+          // 独立した角度調整モードでは Shift 不要。水平ドラッグで MPR の面内角度を変更。
           rotateMprFamily(id, e.movementX * Math.PI / 360);
           show();
         } else {
@@ -3864,6 +3866,9 @@ const brushMouseUp = () => {
 
 // rectROI / brushROI の左ボタン down/up を tool に応じて振り分ける。
 const onBoxMouseDown = (e: MouseEvent) => {
+  // 角度調整モード中は page の通常操作だけを mouseMove 側で処理する。
+  // ここでは ROI 系の mousedown を起動しない。
+  if (angleAdjustMode.value) return;
   // 手動 alignment の Shift+ドラッグ中は ROI 系ツールを起動しない (誤って描かないように)
   if (e.shiftKey && manualAlignBoxId.value === getIdOfEventOccured(e)) return;
   if (leftButtonFunction.value === "sphereROI") sphereRoiMouseDown(e);
