@@ -927,7 +927,7 @@ const drawerLeft = ref(false);
 // 開くのは MTV measurement を選んだとき (runPetStandardWith) と、ユーザのトグル操作だけ。
 // **true に戻さないこと** — 起動直後にパネルが出てしまう。
 const drawerRight = ref(false);
-type LeftButtonFunction = 'window' | 'pan' | 'zoom' | 'page' | 'sphereROI' | 'assignLabel';
+type LeftButtonFunction = 'window' | 'pan' | 'zoom' | 'page' | 'sphereROI' | 'pixelROI' | 'assignLabel';
 const leftButtonFunction = ref<LeftButtonFunction>();
 const [w, h] = getWH();
 const imageBoxW = ref(w);
@@ -951,6 +951,7 @@ const tools: Array<{ value: LeftButtonFunction; icon: string; label: string }> =
   { value: 'zoom',       icon: 'mdi-magnify-plus-outline',  label: 'ズーム' },
   { value: 'page',       icon: 'mdi-arrow-up-down',         label: 'ページ送り / MPR角度（Shift+ドラッグ）' },
   { value: 'sphereROI',  icon: 'mdi-circle-outline',        label: '球 VOI' },
+  { value: 'pixelROI',   icon: 'mdi-crosshairs',             label: '1 Pixel 計測' },
   { value: 'assignLabel',icon: 'mdi-tag-outline',           label: 'ラベルを付与' },
 ];
 
