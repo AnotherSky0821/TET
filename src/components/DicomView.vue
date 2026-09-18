@@ -159,6 +159,90 @@ const mprOrientationBySeries = new Map<number, THREE.Quaternion>();
 // 独立した MPR 角度調整モード。ページ送りの Shift 操作とは分離する。
 const angleAdjustMode = defineModel<boolean>("angleAdjustMode", { default: false });
 
+// Onis風のMPR回転円。角度調整モード中は選択中のVolume/MPR boxに重ねて表示する。
+// 円周ドラッグはマウス位置の角度差をそのままMPRの面内回転へ変換する。
+const angleDialDrag = ref<{ boxId: number; lastAngle: number } | null>(null);
+const angleDialDragging = ref(false);
+
+const angleAdjustTargetBoxId = (): number | null => {
+  if (!angleAdjustMode.value) return null;
+  const id = selectedImageBoxId.value;
+  if (!isAnyVolumeBox(id)) return null;
+  const info = getVolumeImageBoxInfo(id);
+  if (isProjectionInfo(info) || !mprPlaneOf(info)) return null;
+  return id;
+};
+
+const angleDialStyle = (): Record<string, string> => {
+  const id = angleAdjustTargetBoxId();
+  if (id == null) return { display: 'none' };
+  const el = (imb.value?.[id] as any)?.$el as HTMLElement | undefined;
+  if (!el) return { display: 'none' };
+  const r = el.getBoundingClientRect();
+  const size = 64;
+  return {
+    left: `${Math.round(r.right - size - 12)}px`,
+    top: `${Math.round(r.top + r.height / 2 - size / 2)}px`,
+  };
+};
+
+const angleDialPointerAngle = (e: MouseEvent, el: HTMLElement): number => {
+  const r = el.getBoundingClientRect();
+  return Math.atan2(e.clientY - (r.top + r.height / 2), e.clientX - (r.left + r.width / 2));
+};
+
+const normalizeAngleDelta = (delta: number): number => {
+  while (delta > Math.PI) delta -= Math.PI * 2;
+  while (delta < -Math.PI) delta += Math.PI * 2;
+  return delta;
+};
+
+const angleDialMouseDown = (e: MouseEvent) => {
+  if (!angleAdjustMode.value || e.button !== 0) return;
+  const id = angleAdjustTargetBoxId();
+  if (id == null) return;
+  const el = e.currentTarget as HTMLElement;
+  angleDialDrag.value = {
+    boxId: id,
+    lastAngle: angleDialPointerAngle(e, el),
+  };
+  angleDialDragging.value = true;
+  window.addEventListener('mousemove', angleDialMouseMoveWindow);
+  window.addEventListener('mouseup', angleDialMouseUpWindow, { once: true });
+  e.preventDefault();
+  e.stopPropagation();
+};
+
+const angleDialMouseMoveWindow = (e: MouseEvent) => {
+  if (!angleDialDrag.value) return;
+  const el = document.querySelector('.mv-angle-dial') as HTMLElement | null;
+  if (!el) return;
+  const current = angleDialPointerAngle(e, el);
+  const delta = normalizeAngleDelta(current - angleDialDrag.value.lastAngle);
+  angleDialDrag.value.lastAngle = current;
+  if (delta === 0) return;
+  rotateMprFamily(angleDialDrag.value.boxId, delta);
+  show();
+};
+
+const angleDialMouseUpWindow = () => {
+  angleDialDrag.value = null;
+  angleDialDragging.value = false;
+  window.removeEventListener('mousemove', angleDialMouseMoveWindow);
+};
+
+const angleDialWheel = (e: WheelEvent) => {
+  if (!angleAdjustMode.value) return;
+  const id = angleAdjustTargetBoxId();
+  if (id == null) return;
+  e.preventDefault();
+  e.stopPropagation();
+  // 1ホイール段 = 0.5°。Shift/Ctrl等には依存せずノートPCのタッチパッドでも細かく操作可能。
+  const degrees = e.deltaY < 0 ? 0.5 : -0.5;
+  rotateMprFamily(id, degrees * Math.PI / 180);
+  show();
+};
+
 const setTimeOutInitAndShow = () => {
   setTimeout(() => {
     for (let a of imb.value!){
@@ -3509,14 +3593,8 @@ const mouseMove = (e: MouseEvent) => {
     }
   }
 
-  // MPR角度調整モードはページ送りとは完全に独立。
-  if (angleAdjustMode.value) {
-    if (e.buttons === 1 && isAnyVolumeBox(id)) {
-      rotateMprFamily(id, e.movementX * Math.PI / 360);
-      show();
-    }
-    return;
-  }
+  // MPR角度調整モードは回転円からのみ操作する。画像本体のドラッグは行わない。
+  if (angleAdjustMode.value) return;
 
   if (leftButtonFunction.value == "page") {
     if (e.buttons == 1) {
@@ -3548,12 +3626,8 @@ const mouseMove = (e: MouseEvent) => {
         }
         showImage(id);
       } else {
-        if (angleAdjustMode.value && isAnyVolumeBox(id)) {
-          // 独立した角度調整モードでは Shift 不要。水平ドラッグで MPR の面内角度を変更。
-          rotateMprFamily(id, e.movementX * Math.PI / 360);
-          show();
-        } else {
-          // page tool drag は MIP/sMIP/通常スライスでは plane-aware paging
+        // angleAdjustMode は上で処理済み（画像本体のドラッグは無効）。
+        // page tool drag は MIP/sMIP/通常スライスでは plane-aware paging
           doOneOrAllSamePlane(id, (i:number) => changeSlice(i, e.movementY));
           recomputeSphereStats();
         }
@@ -7679,6 +7753,23 @@ defineExpose({
       />
     </div>
 
+    <!-- Onis風 MPR回転円。角度調整モード時、選択中のMPR box右側に重ねる。 -->
+    <div
+      v-if="angleAdjustTargetBoxId() !== null"
+      class="mv-angle-dial"
+      :class="{ 'is-dragging': angleDialDragging }"
+      :style="angleDialStyle()"
+      @mousedown.left="angleDialMouseDown"
+      @wheel.prevent.stop="angleDialWheel"
+      title="ドラッグ / ホイールでMPR角度調整"
+    >
+      <div class="mv-angle-dial-ring">
+        <div class="mv-angle-dial-needle" />
+        <div class="mv-angle-dial-center" />
+      </div>
+      <span class="mv-angle-dial-label">ROT</span>
+    </div>
+
     <!-- Debug: voxel hover inspector -->
     <DebugInspector
       :enabled="debugMode"
@@ -8055,6 +8146,67 @@ defineExpose({
   border-radius: 5px; color: var(--mv-text); font-size: 11px;
 }
 .mv-pixel-float-hdr { display:flex; align-items:center; color:var(--mv-accent); font-size:10px; font-weight:700; margin-bottom:3px; }
+
+.mv-angle-dial {
+  position: fixed;
+  z-index: 9996;
+  width: 64px;
+  height: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: rgba(8, 12, 16, 0.72);
+  border: 1px solid rgba(170, 190, 205, 0.45);
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.45);
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+.mv-angle-dial.is-dragging {
+  cursor: grabbing;
+  border-color: var(--mv-accent, #00d4aa);
+  box-shadow: 0 0 0 1px rgba(0, 212, 170, 0.22), 0 4px 16px rgba(0, 0, 0, 0.55);
+}
+.mv-angle-dial-ring {
+  position: relative;
+  width: 48px;
+  height: 48px;
+  border: 2px solid rgba(210, 225, 235, 0.72);
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(65, 78, 90, 0.28) 0 32%, rgba(20, 26, 32, 0.38) 33% 100%);
+}
+.mv-angle-dial-needle {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 18px;
+  height: 2px;
+  transform: translateY(-50%);
+  transform-origin: left center;
+  background: var(--mv-accent, #00d4aa);
+  box-shadow: 0 0 4px rgba(0, 212, 170, 0.7);
+}
+.mv-angle-dial-center {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 6px;
+  height: 6px;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  background: #d7e0e8;
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.45);
+}
+.mv-angle-dial-label {
+  position: absolute;
+  right: 3px;
+  bottom: 1px;
+  font: 7px 'JetBrains Mono', 'Consolas', monospace;
+  color: rgba(215, 224, 232, 0.72);
+  letter-spacing: 0.04em;
+  pointer-events: none;
+}
 
 .mv-debug-badge {
   position: fixed;
