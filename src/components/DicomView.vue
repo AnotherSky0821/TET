@@ -165,6 +165,7 @@ const angleAdjustMode = defineModel<boolean>("angleAdjustMode", { default: false
 type MprDialAxis = 'axi' | 'sag' | 'cor';
 const angleDialHoverBoxId = ref<number | null>(null);
 const angleDialExpanded = ref<MprDialAxis | null>(null);
+const angleDialSuppressClick = ref(false);
 const angleDialDrag = ref<{ boxId: number; axis: MprDialAxis; lastAngle: number; moved: boolean } | null>(null);
 const angleDialDragging = ref(false);
 let angleDialHideTimer: ReturnType<typeof setTimeout> | null = null;
@@ -284,12 +285,13 @@ const angleDialMouseUpWindow = () => {
   angleDialDrag.value = null;
   angleDialDragging.value = false;
   window.removeEventListener('mousemove', angleDialMouseMoveWindow);
-  // ドラッグでは±展開を開かない。単純クリックだけが toggle する。
-  if (moved) return;
+  // ドラッグ直後に click が発火して±が開くのを防ぐ。
+  if (moved) angleDialSuppressClick.value = true;
 };
 
 const angleDialClick = (axis: MprDialAxis) => {
   if (angleDialDragging.value) return;
+  if (angleDialSuppressClick.value) { angleDialSuppressClick.value = false; return; }
   angleDialExpanded.value = angleDialExpanded.value === axis ? null : axis;
 };
 
@@ -7724,8 +7726,9 @@ defineExpose({
         :resize-mode="resizeModeBoxId === i-1"
         @wheel.prevent="wheel"
         @click="imageBoxClicked"
+        @mouseenter="angleDialShowForBox(i-1)"
         @mousemove="mouseMove"
-        @mouseleave="onBoxMouseLeave(i-1)"
+        @mouseleave="(e: MouseEvent) => { onBoxMouseLeave(i-1); angleDialHideForBox(i-1); }"
         @mousedown.left="onBoxMouseDown"
         @mouseup.left="onBoxMouseUp"
         @mousedown.middle.prevent
