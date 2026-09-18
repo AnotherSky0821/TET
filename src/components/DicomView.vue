@@ -2221,6 +2221,10 @@ const applySyncPaging = (srcId: number, add_number: number) => {
     }
     showImage(i);
   }
+  // A sphere is a world-space VOI, so paging must never invalidate its result.
+  // Recompute once after the complete sync group has moved (rather than once per
+  // box) so slider / keyboard paging keeps the PET and CT readouts alive.
+  recomputeSphereStats();
 };
 
 const setMyWCWW = (i:number, wc:number | null, ww: number | null) => {
@@ -3359,6 +3363,44 @@ const polygonCursor = ref<[number, number] | null>(null);
 // box から出たら null。ブラシサイズを視覚化する目的。
 const brushCursor = ref<{ boxId: number; x: number; y: number } | null>(null);
 
+// Sphere ROI is placed once, then moved only by dragging the visible sphere.
+// Keeping this state outside the click handler also lets a drag continue when
+// the cursor leaves the canvas before mouseup.
+let sphereRoiDrag: { boxId: number } | null = null;
+
+const isPointInsideSphereRoi = (boxId: number, x: number, y: number): boolean => {
+  const sphere = segStore.sphere;
+  if (!sphere || !isAnyVolumeBox(boxId)) return false;
+  const box = getVolumeImageBoxInfo(boxId);
+  if (isProjectionInfo(box)) return false;
+  const w = screenToWorld(boxId, x, y);
+  return w.distanceTo(sphere.centerWorld) <= sphere.radiusMm;
+};
+
+const moveSphereRoiTo = (boxId: number, x: number, y: number) => {
+  const sphere = segStore.sphere;
+  if (!sphere) return;
+  const w = screenToWorld(boxId, x, y);
+  sphere.centerWorld.copy(w);
+  recomputeSphereStats();
+  syncRoiSlicesToWorld(w);
+};
+
+const sphereRoiMouseDown = (e: MouseEvent) => {
+  const id = getIdOfEventOccured(e);
+  if (!isAnyVolumeBox(id) || !segStore.sphere) return;
+  const [x, y] = getCanvasXY(e);
+  if (!isPointInsideSphereRoi(id, x, y)) return;
+  sphereRoiDrag = { boxId: id };
+  selectedImageBoxId.value = id;
+  window.addEventListener('mouseup', sphereRoiMouseUp, { once: true });
+  e.preventDefault();
+};
+
+const sphereRoiMouseUp = () => {
+  sphereRoiDrag = null;
+};
+
 const mouseMove = (e: MouseEvent) => {
   const id = getIdOfEventOccured(e);
   const infoV = getVolumeImageBoxInfo;
@@ -3391,6 +3433,14 @@ const mouseMove = (e: MouseEvent) => {
   if ((e.buttons & 2) !== 0){
     rightDragActive.value = true;
     applyWindowLevelDrag(id, e.movementX, e.movementY);
+    return;
+  }
+
+  // Do this before the generic left-button tools.  A sphere drag must not also
+  // page, pan, or window the image, and it intentionally changes only the ROI.
+  if (sphereRoiDrag && (e.buttons & 1) !== 0 && sphereRoiDrag.boxId === id) {
+    const [x, y] = getCanvasXY(e);
+    moveSphereRoiTo(id, x, y);
     return;
   }
 
@@ -3469,6 +3519,7 @@ const mouseMove = (e: MouseEvent) => {
         } else {
           // page tool drag は MIP/sMIP/通常スライスでは plane-aware paging
           doOneOrAllSamePlane(id, (i:number) => changeSlice(i, e.movementY));
+          recomputeSphereStats();
         }
         show();
       }
@@ -3555,6 +3606,10 @@ const wheel = (e: WheelEvent) => {
     const src = imageBoxInfos.value[id] as VolumeImageBoxInfo;
     if (src.vecz && !src.isMip) {
       segStore.advanceCrosshair(src.vecz, change);
+      // advanceCrosshair preserves the historical wheel behavior (it moves an
+      // existing sphere), but only updates PET values itself.  Refresh both
+      // PET and CT so the floating ROI result never goes stale after paging.
+      recomputeSphereStats();
       // sync が ON で他 box が描画済みの後に crosshair が動いたので再描画
       doOneOrAll(id, (i: number) => showImage(i));
     }
@@ -3600,20 +3655,29 @@ const handleAssignLabelClick = (e: MouseEvent) => {
   show();
 };
 
-// Lesion table などから world 座標へ「ジャンプ」する。全 Volume/Fusion box の断面が
-// その点を通るよう centerInWorld を移動し (= 正しいスライスへ移動 + 画面中央に配置)、
-// crosshair も設定する。MIP/VR は投影/回転ビューなので視点を動かさない。
-const jumpToWorld = (p: THREE.Vector3) => {
+// ROI world point に各 MPR の through-plane だけを揃える。centerInWorld を point
+// で丸ごと置換すると面内成分 (= ユーザーの pan) まで失われるため、既存の
+// alignBoxThroughPlaneToWorld を使い法線方向だけ動かす。
+const syncRoiSlicesToWorld = (p: THREE.Vector3) => {
   if (syncRoiSlice.value) {
-    for (let i = 0; i < imageBoxInfos.value.length; i++){
+    for (let i = 0; i < imageBoxInfos.value.length; i++) {
       if (!isAnyVolumeBox(i)) continue;
       const a = getVolumeImageBoxInfo(i);
-      if (isProjectionInfo(a) || !a.centerInWorld) continue;   // 未初期化 box を防御
-      a.centerInWorld.copy(p);
+      if (isProjectionInfo(a) || !a.centerInWorld) continue;
+      alignBoxThroughPlaneToWorld(i, p);
     }
   }
+  // The legacy crosshair is coupled to the sphere.  At this point both already
+  // have p, so this preserves crosshair state without changing the ROI again.
   segStore.setCrosshairWorld(p);
+  recomputeSphereStats();
   show();
+};
+
+// Lesion table などから world 座標へ「ジャンプ」する。画像位置を変えず、各
+// Volume/Fusion box のスライス面だけをその点に合わせる。MIP/VR は動かさない。
+const jumpToWorld = (p: THREE.Vector3) => {
+  syncRoiSlicesToWorld(p);
 };
 
 // SegmentationPanel からツールを切り替える (例: "Assign label" を有効化)。
@@ -3774,10 +3838,12 @@ const brushMouseUp = () => {
 const onBoxMouseDown = (e: MouseEvent) => {
   // 手動 alignment の Shift+ドラッグ中は ROI 系ツールを起動しない (誤って描かないように)
   if (e.shiftKey && manualAlignBoxId.value === getIdOfEventOccured(e)) return;
-  if (leftButtonFunction.value === "rectROI") rectRoiMouseDown(e);
+  if (leftButtonFunction.value === "sphereROI") sphereRoiMouseDown(e);
+  else if (leftButtonFunction.value === "rectROI") rectRoiMouseDown(e);
   else if (leftButtonFunction.value === "brushROI") brushMouseDown(e);
 };
 const onBoxMouseUp = () => {
+  sphereRoiMouseUp();
   if (rectRoiDraft.value) rectRoiMouseUp();
   if (brushStroke.value) brushMouseUp();
 };
@@ -4044,15 +4110,14 @@ const handleSphereClick = (e: MouseEvent) => {
     return;
   }
 
-  const radius = segStore.sphere?.radiusMm ?? 10;
-  if (!segStore.sphere) segStore.setSphere(w, radius);
-  else segStore.sphere.centerWorld.copy(w);
+  // Normal sphere placement is a one-time click.  Once it exists, its position
+  // is deliberately not changed by another click; grab and drag the visible
+  // sphere instead.  This prevents an accidental click after paging from
+  // silently replacing the VOI.
+  if (segStore.sphere) return;
+  segStore.setSphere(w, 10);
   recomputeSphereStats();
-  if (syncRoiSlice.value) jumpToWorld(w);
-  else {
-    segStore.setCrosshairWorld(w);
-    show();
-  }
+  syncRoiSlicesToWorld(w);
 };
 
 const recomputeSphereStats = () => {
