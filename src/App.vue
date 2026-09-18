@@ -972,7 +972,7 @@ const tools: Array<{ value: LeftButtonFunction; icon: string; label: string }> =
 const onToolClick = (tool: LeftButtonFunction | 'angleAdjust') => {
   if (tool === 'angleAdjust') {
     angleAdjustMode.value = !angleAdjustMode.value;
-    if (angleAdjustMode.value) leftButtonFunction.value = 'page';
+    if (angleAdjustMode.value) leftButtonFunction.value = undefined;
     return;
   }
   if (angleAdjustMode.value) angleAdjustMode.value = false;
