@@ -166,7 +166,13 @@ type MprDialAxis = 'axi' | 'sag' | 'cor';
 const angleDialHoverBoxId = ref<number | null>(null);
 const angleDialExpanded = ref<MprDialAxis | null>(null);
 const angleDialSuppressClick = ref(false);
-const angleDialDrag = ref<{ boxId: number; axis: MprDialAxis; lastAngle: number; moved: boolean } | null>(null);
+const angleDialDrag = ref<{
+  boxId: number;
+  axis: MprDialAxis;
+  lastAngle: number;
+  moved: boolean;
+  throughCenter: boolean;
+} | null>(null);
 const angleDialDragging = ref(false);
 let angleDialHideTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -277,6 +283,7 @@ const angleDialMouseDown = (e: MouseEvent, axis: MprDialAxis) => {
     axis,
     lastAngle: angleDialPointerAngle(e, el),
     moved: false,
+    throughCenter: false,
   };
   angleDialDragging.value = true;
   window.addEventListener('mousemove', angleDialMouseMoveWindow);
@@ -290,7 +297,27 @@ const angleDialMouseMoveWindow = (e: MouseEvent) => {
   if (!drag) return;
   const el = document.querySelector(`.mv-angle-dial[data-axis="${drag.axis}"]`) as HTMLElement | null;
   if (!el) return;
-  const current = angleDialPointerAngle(e, el);
+
+  const r = el.getBoundingClientRect();
+  const dx = e.clientX - (r.left + r.width / 2);
+  const dy = e.clientY - (r.top + r.height / 2);
+  const radius = Math.hypot(dx, dy);
+
+  // 円の中心を横切ると atan2 が一瞬で ±π 付近へ飛び、逆方向へ大きく回転してしまう。
+  // 中心付近では角度計算を止め、中心を抜けた最初の位置を新しい基準にする。
+  const centerDeadZone = 10;
+  if (radius <= centerDeadZone) {
+    drag.throughCenter = true;
+    return;
+  }
+
+  const current = Math.atan2(dy, dx);
+  if (drag.throughCenter) {
+    drag.lastAngle = current;
+    drag.throughCenter = false;
+    return;
+  }
+
   const delta = normalizeAngleDelta(current - drag.lastAngle);
   drag.lastAngle = current;
   if (Math.abs(delta) < 0.0001) return;
