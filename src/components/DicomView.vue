@@ -7865,20 +7865,18 @@ defineExpose({
   display: flex;
   justify-content: space-between;
   gap: 10px;
-  color: var(--mv-text-muted);
+  /* All secondary CT/PET labels and values use one neutral color. */
+  color: #d7e0e8;
   line-height: 1.5;
 }
 .mv-sphere-float-row .mono {
   font-family: 'JetBrains Mono', monospace;
   font-size: 10px;
-  color: var(--mv-text);
+  color: #d7e0e8;
 }
-/* SUV values need to remain legible over the dark floating panel regardless of
-   the active application accent color. */
-.mv-sphere-suv { color: #e6fbff; }
-.mv-sphere-suv .lbl { color: #d8f8ff; }
-.mv-sphere-suv .val,
-.mv-sphere-suv .mono {
+/* Only the primary (top) SUV value is color-emphasized. */
+.mv-sphere-float-max.mv-sphere-suv .lbl { color: #d8f8ff; }
+.mv-sphere-float-max.mv-sphere-suv .val {
   color: #7ee7ff;
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
 }
