@@ -792,6 +792,7 @@
         v-model:debugMode="voxelInspector"
         v-model:showOverlayInfo="showOverlayInfo"
         v-model:noGapMode="noGapMode"
+        v-model:angleAdjustMode="angleAdjustMode"
       />
     </v-main>
 
