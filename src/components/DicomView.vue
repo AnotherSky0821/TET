@@ -3509,6 +3509,15 @@ const mouseMove = (e: MouseEvent) => {
     }
   }
 
+  // MPR角度調整モードはページ送りとは完全に独立。
+  if (angleAdjustMode.value) {
+    if (e.buttons === 1 && isAnyVolumeBox(id)) {
+      rotateMprFamily(id, e.movementX * Math.PI / 360);
+      show();
+    }
+    return;
+  }
+
   if (leftButtonFunction.value == "page") {
     if (e.buttons == 1) {
       const srcInfo = imageBoxInfos.value[id] as VolumeImageBoxInfo | undefined;
