@@ -1271,6 +1271,7 @@ const triggerMipFast = (i: number) => {
 // ---- Title bar emit ハンドラ ----
 const onTitlebarClose = (i: number) => {
   if (sphereRoiDrag?.boxId === i) sphereRoiMouseUp();
+  if (pixelRoiDrag?.boxId === i) pixelRoiMouseUp();
   if (pixelMeasure.value?.boxId === i) pixelMeasure.value = null;
   const timer = mipIdleTimers.get(i);
   if (timer != null) clearTimeout(timer);
@@ -3866,11 +3867,13 @@ const onBoxMouseDown = (e: MouseEvent) => {
   // 手動 alignment の Shift+ドラッグ中は ROI 系ツールを起動しない (誤って描かないように)
   if (e.shiftKey && manualAlignBoxId.value === getIdOfEventOccured(e)) return;
   if (leftButtonFunction.value === "sphereROI") sphereRoiMouseDown(e);
+  else if (leftButtonFunction.value === "pixelROI") pixelRoiMouseDown(e);
   else if (leftButtonFunction.value === "rectROI") rectRoiMouseDown(e);
   else if (leftButtonFunction.value === "brushROI") brushMouseDown(e);
 };
 const onBoxMouseUp = () => {
   sphereRoiMouseUp();
+  pixelRoiMouseUp();
   if (rectRoiDraft.value) rectRoiMouseUp();
   if (brushStroke.value) brushMouseUp();
 };
@@ -4115,13 +4118,7 @@ if (typeof window !== "undefined"){
   window.addEventListener("keydown", onKeyDown);
 }
 
-const handlePixelClick = (e: MouseEvent) => {
-  const id = getIdOfEventOccured(e);
-  if (!isAnyVolumeBox(id)) return;
-  const box = getVolumeImageBoxInfo(id);
-  if (isProjectionInfo(box)) return;
-  const [x, y] = getCanvasXY(e);
-  const w = screenToWorld(id, x, y);
+const samplePixelValues = (w: THREE.Vector3) => {
   const sample = (vol: VolumeType | null) => {
     if (!vol) return null;
     const v = worldToVoxel(w, vol);
@@ -4129,13 +4126,75 @@ const handlePixelClick = (e: MouseEvent) => {
     if (ix < 0 || ix >= vol.nx || iy < 0 || iy >= vol.ny || iz < 0 || iz >= vol.nz) return null;
     return vol.voxel[ix + iy * vol.nx + iz * vol.nx * vol.ny];
   };
-  pixelMeasure.value = {
-    boxId: id, screenX: x, screenY: y,
+  return {
     petValue: sample(petVolumeForSphereStats()),
     ctValue: sample(segStore.ctVolumeRef),
   };
+};
+
+const handlePixelClick = (e: MouseEvent) => {
+  const id = getIdOfEventOccured(e);
+  if (!isAnyVolumeBox(id)) return;
+  const box = getVolumeImageBoxInfo(id);
+  if (isProjectionInfo(box)) return;
+  const [x, y] = getCanvasXY(e);
+  const w = screenToWorld(id, x, y);
+  const values = samplePixelValues(w);
+  pixelMeasure.value = {
+    boxId: id, screenX: x, screenY: y,
+    petValue: values.petValue,
+    ctValue: values.ctValue,
+  };
   selectedImageBoxId.value = id;
   show();
+};
+
+// 1 Pixel は既存ポインターをドラッグして移動できる。ドラッグ中は画像の
+// pan/page/window-level に流さず、World 座標を更新して他 MPR のスライスも同期する。
+let pixelRoiDrag: { boxId: number } | null = null;
+const pixelRoiMouseDown = (e: MouseEvent) => {
+  if (leftButtonFunction.value !== "pixelROI" || e.button !== 0 || !pixelMeasure.value) return;
+  const id = getIdOfEventOccured(e);
+  if (id !== pixelMeasure.value.boxId || !isAnyVolumeBox(id)) return;
+  const box = getVolumeImageBoxInfo(id);
+  if (isProjectionInfo(box)) return;
+  const [x, y] = getCanvasXY(e);
+  if (Math.hypot(x - pixelMeasure.value.screenX, y - pixelMeasure.value.screenY) > 14) return;
+  pixelRoiDrag = { boxId: id };
+  selectedImageBoxId.value = id;
+  window.addEventListener('mousemove', pixelRoiMouseMoveWindow);
+  window.addEventListener('mouseup', pixelRoiMouseUp);
+  e.preventDefault();
+  e.stopPropagation();
+};
+
+const pixelRoiMouseMoveWindow = (e: MouseEvent) => {
+  if (!pixelRoiDrag || !pixelMeasure.value) return;
+  const box = imb.value?.[pixelRoiDrag.boxId] as any;
+  const cvRaw = box?.cv1;
+  const cv = cvRaw ? ((cvRaw.value ?? cvRaw) as HTMLCanvasElement) : null;
+  if (!cv) return;
+  const r = cv.getBoundingClientRect();
+  const x = cv.width ? (e.clientX - r.left) * cv.width / r.width : e.clientX - r.left;
+  const y = cv.height ? (e.clientY - r.top) * cv.height / r.height : e.clientY - r.top;
+  if (x < 0 || y < 0 || x > cv.width || y > cv.height) return;
+  const w = screenToWorld(pixelRoiDrag.boxId, x, y);
+  const values = samplePixelValues(w);
+  pixelMeasure.value = {
+    ...pixelMeasure.value,
+    boxId: pixelRoiDrag.boxId,
+    screenX: x,
+    screenY: y,
+    petValue: values.petValue,
+    ctValue: values.ctValue,
+  };
+  syncRoiSlicesToWorld(w, pixelRoiDrag.boxId);
+};
+
+const pixelRoiMouseUp = () => {
+  pixelRoiDrag = null;
+  window.removeEventListener('mousemove', pixelRoiMouseMoveWindow);
+  window.removeEventListener('mouseup', pixelRoiMouseUp);
 };
 
 const handleSphereClick = (e: MouseEvent) => {
