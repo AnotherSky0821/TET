@@ -41,35 +41,89 @@ export const sphereStatsInVolume = (
     centerWorld: THREE.Vector3,
     radiusMm: number,
 ): SphereVolumeStats => {
-    const cx = centerWorld.x, cy = centerWorld.y, cz = centerWorld.z;
-    const r2 = radiusMm * radiusMm;
-    const nx = volume.nx, ny = volume.ny, nz = volume.nz;
-    const vox = volume.voxel;
-    const stepX = volume.vectorX.length(), stepY = volume.vectorY.length(), stepZ = volume.vectorZ.length();
-    const padX = Math.ceil(radiusMm / Math.max(stepX, 1e-6)) + 1;
-    const padY = Math.ceil(radiusMm / Math.max(stepY, 1e-6)) + 1;
-    const padZ = Math.ceil(radiusMm / Math.max(stepZ, 1e-6)) + 1;
-    const centerVoxel = worldToVoxel(centerWorld, volume);
-    const i0 = Math.max(0, Math.floor(centerVoxel.x - padX)), i1 = Math.min(nx - 1, Math.ceil(centerVoxel.x + padX));
-    const j0 = Math.max(0, Math.floor(centerVoxel.y - padY)), j1 = Math.min(ny - 1, Math.ceil(centerVoxel.y + padY));
-    const k0 = Math.max(0, Math.floor(centerVoxel.z - padZ)), k1 = Math.min(nz - 1, Math.ceil(centerVoxel.z + padZ));
-    let min = Infinity, max = -Infinity, sum = 0, sum2 = 0, count = 0;
-    const p = new THREE.Vector3();
-    for (let k = k0; k <= k1; k++) for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
-        p.set(i, j, k);
-        const w = voxelToWorld(p, volume);
-        const dx=w.x-cx, dy=w.y-cy, dz=w.z-cz;
-        if (dx*dx + dy*dy + dz*dz > r2) continue;
-        const val=vox[k*nx*ny+j*nx+i];
-        if (val<min) min=val;
-        if (val>max) max=val;
-        sum += val; sum2 += val*val; count++;
-    }
-    if (count===0) return {min:0,max:0,mean:0,std:0,voxelCount:0};
-    const mean=sum/count;
-    return {min,max,mean,std:Math.sqrt(Math.max(0,sum2/count-mean*mean)),voxelCount:count};
-};
+    const r = Math.max(0, radiusMm);
+    if (r <= 0) return { min: 0, max: 0, mean: 0, std: 0, voxelCount: 0 };
 
+    const { nx, ny, nz, voxel } = volume;
+    const centerVoxel = worldToVoxel(centerWorld, volume);
+
+    // world = imagePosition + i*vectorX + j*vectorY + k*vectorZ.
+    // The old implementation called voxelToWorld() for every voxel. For a 20 mm
+    // sphere that creates a large number of Vector3 objects and matrix operations.
+    // Convert the center once, then evaluate the physical distance with the
+    // affine basis directly. This is exact for oblique volumes as well.
+    const vx = volume.vectorX, vy = volume.vectorY, vz = volume.vectorZ;
+    const gxx = vx.dot(vx), gyy = vy.dot(vy), gzz = vz.dot(vz);
+    const gxy = vx.dot(vy), gxz = vx.dot(vz), gyz = vy.dot(vz);
+
+    // A physical sphere transformed by M^-1 becomes an ellipsoid in voxel
+    // coordinates. For each voxel axis, the maximum coordinate deviation is
+    // radius * ||row(M^-1)||. This gives a safe bounding box even for oblique data.
+    const a = vx.x, b = vy.x, c = vz.x;
+    const d = vx.y, e = vy.y, f = vz.y;
+    const g = vx.z, h = vy.z, i = vz.z;
+    const A = e * i - f * h;
+    const B = f * g - d * i;
+    const C = d * h - e * g;
+    const det = a * A + b * B + c * C;
+    if (Math.abs(det) < 1e-12) {
+        return { min: 0, max: 0, mean: 0, std: 0, voxelCount: 0 };
+    }
+    const invDet = 1 / det;
+    const m00 = A * invDet, m01 = (c * h - b * i) * invDet, m02 = (b * f - c * e) * invDet;
+    const m10 = B * invDet, m11 = (a * i - c * g) * invDet, m12 = (c * d - a * f) * invDet;
+    const m20 = C * invDet, m21 = (b * g - a * h) * invDet, m22 = (a * e - b * d) * invDet;
+
+    const padX = Math.ceil(r * Math.hypot(m00, m01, m02)) + 1;
+    const padY = Math.ceil(r * Math.hypot(m10, m11, m12)) + 1;
+    const padZ = Math.ceil(r * Math.hypot(m20, m21, m22)) + 1;
+
+    const i0 = Math.max(0, Math.floor(centerVoxel.x - padX));
+    const i1 = Math.min(nx - 1, Math.ceil(centerVoxel.x + padX));
+    const j0 = Math.max(0, Math.floor(centerVoxel.y - padY));
+    const j1 = Math.min(ny - 1, Math.ceil(centerVoxel.y + padY));
+    const k0 = Math.max(0, Math.floor(centerVoxel.z - padZ));
+    const k1 = Math.min(nz - 1, Math.ceil(centerVoxel.z + padZ));
+
+    const r2 = r * r;
+    let min = Infinity, max = -Infinity, sum = 0, sum2 = 0, count = 0;
+
+    for (let k = k0; k <= k1; k++) {
+        const dz = k - centerVoxel.z;
+        for (let j = j0; j <= j1; j++) {
+            const dy = j - centerVoxel.y;
+            const yz = 2 * dy * dz * gyz;
+            for (let ii = i0; ii <= i1; ii++) {
+                const dx = ii - centerVoxel.x;
+                const d2 =
+                    dx * dx * gxx +
+                    dy * dy * gyy +
+                    dz * dz * gzz +
+                    2 * dx * dy * gxy +
+                    2 * dx * dz * gxz +
+                    yz;
+                if (d2 > r2) continue;
+
+                const val = voxel[k * nx * ny + j * nx + ii];
+                if (val < min) min = val;
+                if (val > max) max = val;
+                sum += val;
+                sum2 += val * val;
+                count++;
+            }
+        }
+    }
+
+    if (count === 0) return { min: 0, max: 0, mean: 0, std: 0, voxelCount: 0 };
+    const mean = sum / count;
+    return {
+        min,
+        max,
+        mean,
+        std: Math.sqrt(Math.max(0, sum2 / count - mean * mean)),
+        voxelCount: count,
+    };
+};
 export const sphereStatsInPet = (
     pet: Volume,
     centerWorld: THREE.Vector3,
