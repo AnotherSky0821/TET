@@ -579,6 +579,14 @@
             <v-list-item-title>{{ syncRoiSlice ? 'ROI slice sync ON' : 'ROI slice sync OFF' }}</v-list-item-title>
             <v-list-item-subtitle>各断面がROIに同期</v-list-item-subtitle>
           </v-list-item>
+          <v-list-item @click="syncMprAngle = !syncMprAngle">
+            <template v-slot:prepend>
+              <v-icon :icon="syncMprAngle ? 'mdi-link-variant' : 'mdi-link-variant-off'" size="small"
+                      :color="syncMprAngle ? 'primary' : undefined" />
+            </template>
+            <v-list-item-title>{{ syncMprAngle ? 'MPR角度同期 ON' : 'MPR角度同期 OFF' }}</v-list-item-title>
+            <v-list-item-subtitle>FusionのPET/CTを同じ角度で回転</v-list-item-subtitle>
+          </v-list-item>
           <v-list-item @click="voxelInspector = !voxelInspector">
             <template v-slot:prepend>
               <v-icon icon="mdi-eyedropper" size="small" :color="voxelInspector ? 'primary' : undefined" />
@@ -958,6 +966,8 @@ const showOverlayInfo = ref(true);
 const noGapMode = ref(true);
 // MPR 角度調整モード。ON の間はページ送りとは独立して角度を変更する。
 const angleAdjustMode = ref(false);
+// MPR角度調整時、FusionのPET/CTを同じ3D角度へ同期するか。
+const syncMprAngle = ref(true);
 
 const tools: Array<{ value: LeftButtonFunction; icon: string; label: string }> = [
   { value: 'window',     icon: 'mdi-contrast-circle',       label: 'ウィンドウ/レベル' },
