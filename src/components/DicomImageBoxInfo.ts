@@ -42,6 +42,9 @@ export type Interpolation = 'nearest' | 'bilinear';
 // Raw 1-frame DICOM viewer box (no MPR, no Volume reconstruction).
 // Counterpart of VolumeImageBoxInfo (3D 再構成スライス) / FusedVolumeImageBoxInfo (CT+PET 重畳)。
 export type DicomSliceImageBoxInfo = ImageBoxInfoBase &  {
+    // tileN を増やして生成された未使用 BOX を明示するマーカー。
+    // defaultInfo() だけが true を持ち、実データを割り当てた BOX では付与されない。
+    isEmpty?: boolean,
     currentSliceNumber: number,
     imageNumberOfDicomTag: number | null,
     centerX:number,
@@ -122,6 +125,8 @@ export type FusedVolumeImageBoxInfo = VolumeImageBoxInfo & {
 export const defaultInfo = (i: number) => {
     return {
         currentSeriesNumber: i,
+        // 初期配列の未使用 BOX / tileN 増加で作られた空 BOX を識別する。
+        isEmpty: true,
         currentSliceNumber:0,
         imageNumberOfDicomTag: null,
         description: "",
