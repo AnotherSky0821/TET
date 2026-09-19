@@ -5187,8 +5187,17 @@ const loadFiles = (files: FileList | File[]) => {
       // series が入ったら左サイドバー (series 一覧 / 表示設定) を出す。
       // 起動直後は空なので隠してあり、drag&drop や Load files で初めて意味を持つ。
       // append 時も新しい series が増えるので同様に開く。
-      if (seriesList.length > 0) drawer.value = true;
-      show();
+      if (seriesList.length > 0) {
+        drawer.value = true;
+        // 初回ロードでは Drawer が開くことで image area の実寸も変わる。
+        // DOM を確定させてから AutoFit → 再描画する。
+        nextTick().then(() => {
+          applyAutoFit();
+          nextTick().then(() => show());
+        });
+      } else {
+        show();
+      }
       isLoading.value = false;
       // 背景で全 JPEG Lossless frame を decompress。完了後にサムネ再生成 + 再描画。
       decompressAllJpegLossless().then(() => {
