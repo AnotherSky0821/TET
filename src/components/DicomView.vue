@@ -3431,25 +3431,26 @@ const appendSeriesAsNewBox = (seriesIdx: number) => {
     imageBoxInfos.value.push(defaultInfo(imageBoxInfos.value.length));
   }
   nextTick().then(() => {
-    onSelectSeriesIntoBox(seriesIdx, newId);
-
-    // 初回自動レイアウトと同じく、PET/PT を新規 Box へドロップした場合は
-    // Volume の Axial MPR (MPR AXI) で表示する。
-    // onSelectSeriesIntoBox() は新規 defaultInfo では DICOM box のままになるため、
-    // PET/PT のときだけ明示的に mpr_() を通す。
     const modality = (seriesList[seriesIdx]?.volume?.metadata?.modality
       ?? seriesList[seriesIdx]?.myDicom?.[0]?.string('x00080060')
       ?? '').toUpperCase();
+
+    // 初回自動レイアウトの PET/PT と同じ処理経路を使う。
+    // 初回ロードでは autoLayoutAfterLoad() が
+    //   ensureVolume_(seriesIdx) -> promoteBoxToVolume(boxId, seriesIdx)
+    // を直接実行する。D&D でも同じ経路を使うことで、空 BOX の DICOM 初期値を
+    // mpr_() が WC/WW/CLUT として継承してしまう差をなくす。
     if (modality === 'PT' || modality === 'PET') {
-      if (mpr_(seriesIdx, newId)) {
-        setPlaneOnBox(newId, 'axi');
+      if (ensureVolume_(seriesIdx)) {
+        promoteBoxToVolume(newId, seriesIdx);
       }
+    } else {
+      onSelectSeriesIntoBox(seriesIdx, newId);
     }
 
     selectedImageBoxId.value = newId;
     autoFitMode.value = true;
     applyAutoFit();
-    matchStandalonePetScaleToCt();
     showImage(newId);
   });
 };
