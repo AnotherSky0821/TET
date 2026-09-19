@@ -4643,14 +4643,47 @@ const onSelectSeriesIntoBox = (idx: number, id: number) => {
   if (id < 0 || id >= imageBoxInfos.value.length) return;
   selectedImageBoxId.value = id;
   const info = imageBoxInfos.value[id];
-  // 既存の Box が DICOM 表示中なら currentSeriesNumber を切替、Volume 表示中なら mpr_ で再構築
-  if (isDicomSliceImageBoxInfo(id)){
-    (info as DicomSliceImageBoxInfo).currentSeriesNumber = idx;
-    (info as DicomSliceImageBoxInfo).currentSliceNumber = 0;
-    (info as DicomSliceImageBoxInfo).description = seriesSummaries.value[idx]?.description ?? "";
-    resetDicomBoxView(info as DicomSliceImageBoxInfo);
+
+  // tileN を増やして生成された「空 BOX」だけは、初回自動レイアウトと同じ
+  // 表示方式でシリーズを配置する。既存 BOX の D&D 挙動は従来どおり維持する。
+  const isEmptyBox = isDicomSliceImageBoxInfo(id)
+    && (info as DicomSliceImageBoxInfo).isEmpty === true;
+
+  if (isEmptyBox) {
+    const modality = seriesModality(idx);
+    const s = seriesList[idx];
+
+    // 初回ロードと同じ分類:
+    //   PET/PT -> ensureVolume_ + promoteBoxToVolume
+    //   NIfTI   -> promoteBoxToVolume
+    //   CT/MR   -> mpr_ + AXI
+    //   その他  -> 従来の DICOM 表示
+    if (isPtModality(modality)) {
+      if (!ensureVolume_(idx)) return;
+      promoteBoxToVolume(id, idx);
+    } else if ((!s.myDicom || s.myDicom.length === 0) && !!s.volume) {
+      promoteBoxToVolume(id, idx);
+    } else if (modality === 'CT' || modality === 'MR') {
+      if (!mpr_(idx, id)) return;
+      setPlaneOnBox(id, 'axi');
+    } else {
+      const d = info as DicomSliceImageBoxInfo;
+      d.currentSeriesNumber = idx;
+      d.currentSliceNumber = 0;
+      d.description = seriesSummaries.value[idx]?.description ?? "";
+      d.isEmpty = false;
+      resetDicomBoxView(d);
+    }
+  } else if (isDicomSliceImageBoxInfo(id)){
+    // 既存の DICOM Box は従来どおり単純にシリーズを差し替える。
+    const d = info as DicomSliceImageBoxInfo;
+    d.currentSeriesNumber = idx;
+    d.currentSliceNumber = 0;
+    d.description = seriesSummaries.value[idx]?.description ?? "";
+    resetDicomBoxView(d);
   } else {
-    // Volume 表示中: 該当シリーズが volume を持たないなら生成 (box[idx] には影響させない)
+    // 既存の Volume 表示中: 該当シリーズが volume を持たないなら生成
+    // (box[idx] には影響させない)。
     if (!seriesList[idx].volume && seriesList[idx].myDicom){
       if (!ensureVolume_(idx)) return;
     }
