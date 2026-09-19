@@ -3432,9 +3432,25 @@ const appendSeriesAsNewBox = (seriesIdx: number) => {
   }
   nextTick().then(() => {
     onSelectSeriesIntoBox(seriesIdx, newId);
+
+    // 初回自動レイアウトと同じく、PET/PT を新規 Box へドロップした場合は
+    // Volume の Axial MPR (MPR AXI) で表示する。
+    // onSelectSeriesIntoBox() は新規 defaultInfo では DICOM box のままになるため、
+    // PET/PT のときだけ明示的に mpr_() を通す。
+    const modality = (seriesList[seriesIdx]?.volume?.metadata?.modality
+      ?? seriesList[seriesIdx]?.myDicom?.[0]?.string('x00080060')
+      ?? '').toUpperCase();
+    if (modality === 'PT' || modality === 'PET') {
+      if (mpr_(seriesIdx, newId)) {
+        setPlaneOnBox(newId, 'axi');
+      }
+    }
+
     selectedImageBoxId.value = newId;
     autoFitMode.value = true;
     applyAutoFit();
+    matchStandalonePetScaleToCt();
+    showImage(newId);
   });
 };
 
